@@ -308,35 +308,39 @@ export const runTool = async (input: {
   providerId: ProviderId;
   apiKey: string;
   model: string;
-  text: string;
   tool: ToolDefinition;
+  instruction: string;
   values: Record<string, string | number | boolean>;
 }): Promise<ToolOutput> => {
   const provider = PROVIDER_BY_ID[input.providerId];
   ensureApiKey(input.apiKey, provider.label);
 
-  const instruction = input.tool.buildInstruction({
-    text: input.text,
-    values: input.values
-  });
-
   const rawText = await provider.runText({
     apiKey: input.apiKey,
     model: input.model,
-    instruction
+    instruction: input.instruction
   });
 
   const parsed = parseToolOutput(rawText);
+  const filteredSections =
+    input.tool.id === "text-structure" && input.values.includeTips === false
+      ? parsed.sections?.filter((section) => section.label.toLowerCase() !== "leestips")
+      : parsed.sections;
+  const normalized: ToolOutput = {
+    ...parsed,
+    sections: filteredSections
+  };
 
-  if (input.tool.outputKind !== "images" || !parsed.images?.length) {
-    return parsed;
+  if (input.tool.outputKind !== "images" || !normalized.images?.length) {
+    return normalized;
   }
 
   if (!provider.supportsImages) {
     return {
-      ...parsed,
-      images: parsed.images.map((asset: ImageAsset) => ({
+      ...normalized,
+      images: normalized.images.map((asset: ImageAsset) => ({
         ...asset,
+        aspectRatio: String(input.values.aspect ?? "1536x1024"),
         imageError: `${provider.label} is in BegrAIp nu alleen gekoppeld voor tekstoutput. De prompts zijn wel al gegenereerd.`
       }))
     };
@@ -344,13 +348,14 @@ export const runTool = async (input: {
 
   const size = String(input.values.aspect ?? "1536x1024");
   const imageResults: ImageAsset[] = await Promise.all(
-    parsed.images.map(async (asset) => {
+    normalized.images.map(async (asset) => {
       try {
         const imageUrl = await generateOpenAIImage(input.apiKey, asset.prompt, size);
-        return { ...asset, imageUrl };
+        return { ...asset, aspectRatio: size, imageUrl };
       } catch (error) {
         return {
           ...asset,
+          aspectRatio: size,
           imageError: error instanceof Error ? error.message : String(error)
         };
       }
@@ -358,7 +363,7 @@ export const runTool = async (input: {
   );
 
   return {
-    ...parsed,
+    ...normalized,
     images: imageResults
   };
 };

@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { DEFAULT_API_KEYS, PROVIDER_BY_ID, PROVIDERS, runTool } from "./openai";
 import { TOOL_CATALOG, TOOL_BY_ID } from "./toolCatalog";
+import type { ProviderId } from "./openai";
 import type { RunResult, ToolDefinition, ToolField } from "./types";
 
-const PROVIDER_STORAGE_KEY = "begraip-provider";
 const API_KEY_STORAGE_KEY = "begraip-api-keys";
 const MODEL_STORAGE_KEY = "begraip-models";
+const ENABLED_PROVIDER_STORAGE_KEY = "begraip-enabled-providers";
 const DEMO_TEXT = `Op een winderige ochtend liep Amir met zijn oma over de dijk langs de rivier. 
 De lucht was grijs, maar op het water dreven glinsterende strepen licht. 
 Oma vertelde dat de rivier al eeuwenlang belangrijk was voor het dorp: vissers verdienden er hun brood, handelaren brachten goederen mee en kinderen leerden aan de oever zwemmen.
@@ -17,6 +18,14 @@ Bij het oude gemaal bleef Amir staan. Hij zag een verweerd bord met onbekende wo
 
 Amir keek nog eens naar de rivier. Opeens begreep hij dat het water niet alleen mooi was, maar ook machtig. 
 Wat vanzelfsprekend leek, bleek het resultaat van veel kennis, werk en keuzes van mensen uit het verleden.`;
+
+type TopTab = "texts" | "llms" | "runs";
+
+const TOP_TABS: Array<{ id: TopTab; label: string }> = [
+  { id: "texts", label: "Texts" },
+  { id: "llms", label: "LLM settings" },
+  { id: "runs", label: "Recent runs" }
+];
 
 const formatSetting = (field: ToolField, value: string | number | boolean) => {
   if (field.type === "toggle") {
@@ -31,32 +40,66 @@ const createRunId = () =>
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
+const formatClockTime = (timestamp: number) =>
+  new Date(timestamp).toLocaleTimeString("nl-NL", {
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+
+const formatDuration = (durationMs: number) => `${(durationMs / 1000).toFixed(1)} s`;
+
+const customValueId = (fieldId: string) => `${fieldId}__custom`;
+
+const resolveToolValues = (
+  tool: ToolDefinition,
+  rawValues: Record<string, string | number | boolean>
+) => {
+  const nextValues: Record<string, string | number | boolean> = { ...rawValues };
+  for (const field of tool.fields) {
+    if (field.type !== "select") {
+      continue;
+    }
+    const customValue = String(rawValues[customValueId(field.id)] ?? "").trim();
+    if (customValue) {
+      nextValues[field.id] = customValue;
+    }
+  }
+  return nextValues;
+};
+
+const getSelection = (text: string, start: number, end: number) => {
+  if (start === end) {
+    return "";
+  }
+  return text.slice(Math.min(start, end), Math.max(start, end)).trim();
+};
+
 export const App = () => {
-  const [providerId, setProviderId] = useState<keyof typeof PROVIDER_BY_ID>("openai");
+  const [activeTab, setActiveTab] = useState<TopTab>("texts");
   const [apiKeysByProvider, setApiKeysByProvider] = useState<Record<string, string>>(() => ({
     ...DEFAULT_API_KEYS
   }));
   const [modelsByProvider, setModelsByProvider] = useState<Record<string, string>>(() =>
     Object.fromEntries(PROVIDERS.map((provider) => [provider.id, provider.defaultModel]))
   );
+  const [enabledProviderIds, setEnabledProviderIds] = useState<ProviderId[]>(["openai"]);
   const [text, setText] = useState(DEMO_TEXT);
+  const [selectedRange, setSelectedRange] = useState({ start: 0, end: 0 });
   const [selectedToolId, setSelectedToolId] = useState(TOOL_CATALOG[0].id);
   const [valuesByTool, setValuesByTool] = useState<Record<string, Record<string, string | number | boolean>>>(
-    () =>
-      Object.fromEntries(TOOL_CATALOG.map((tool) => [tool.id, { ...tool.defaults }]))
+    () => Object.fromEntries(TOOL_CATALOG.map((tool) => [tool.id, { ...tool.defaults }]))
   );
+  const [customInstructionsByTool, setCustomInstructionsByTool] = useState<Record<string, string>>({});
+  const [promptOverridesByTool, setPromptOverridesByTool] = useState<Record<string, string>>({});
   const [results, setResults] = useState<RunResult[]>([]);
   const [activeResultId, setActiveResultId] = useState<string | null>(null);
   const [answersByResult, setAnswersByResult] = useState<Record<string, Record<number, number>>>({});
   const [loading, setLoading] = useState(false);
+  const [loadingStartedAt, setLoadingStartedAt] = useState<number | null>(null);
+  const [loadingElapsedMs, setLoadingElapsedMs] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const savedProviderId = window.localStorage.getItem(PROVIDER_STORAGE_KEY);
-    if (savedProviderId && savedProviderId in PROVIDER_BY_ID) {
-      setProviderId(savedProviderId as keyof typeof PROVIDER_BY_ID);
-    }
-
     const savedKeys = window.localStorage.getItem(API_KEY_STORAGE_KEY);
     if (savedKeys) {
       setApiKeysByProvider((current) => ({
@@ -72,11 +115,16 @@ export const App = () => {
         ...(JSON.parse(savedModels) as Record<string, string>)
       }));
     }
-  }, []);
 
-  useEffect(() => {
-    window.localStorage.setItem(PROVIDER_STORAGE_KEY, providerId);
-  }, [providerId]);
+    const savedEnabledProviders = window.localStorage.getItem(ENABLED_PROVIDER_STORAGE_KEY);
+    if (savedEnabledProviders) {
+      const parsed = JSON.parse(savedEnabledProviders) as ProviderId[];
+      const valid = parsed.filter((providerId) => providerId in PROVIDER_BY_ID);
+      if (valid.length) {
+        setEnabledProviderIds(valid);
+      }
+    }
+  }, []);
 
   useEffect(() => {
     window.localStorage.setItem(API_KEY_STORAGE_KEY, JSON.stringify(apiKeysByProvider));
@@ -86,81 +134,52 @@ export const App = () => {
     window.localStorage.setItem(MODEL_STORAGE_KEY, JSON.stringify(modelsByProvider));
   }, [modelsByProvider]);
 
-  const selectedProvider = PROVIDER_BY_ID[providerId];
-  const apiKey = apiKeysByProvider[providerId] ?? "";
-  const model = modelsByProvider[providerId] ?? selectedProvider.defaultModel;
-  const selectedTool = TOOL_BY_ID[selectedToolId] as ToolDefinition;
-  const selectedValues = valuesByTool[selectedToolId];
-  const activeResult = results.find((result) => result.id === activeResultId) ?? results[0] ?? null;
+  useEffect(() => {
+    window.localStorage.setItem(ENABLED_PROVIDER_STORAGE_KEY, JSON.stringify(enabledProviderIds));
+  }, [enabledProviderIds]);
 
-  const groupedTools = useMemo(() => {
-    return TOOL_CATALOG.reduce<Record<string, ToolDefinition[]>>((accumulator, tool) => {
-      accumulator[tool.category] ??= [];
-      accumulator[tool.category].push(tool);
-      return accumulator;
-    }, {});
-  }, []);
-
-  const runSelectedTool = async () => {
-    if (!text.trim()) {
-      setError("Plak eerst een tekst in de playground.");
+  useEffect(() => {
+    if (!loadingStartedAt) {
+      setLoadingElapsedMs(0);
       return;
     }
 
-    setLoading(true);
-    setError(null);
+    setLoadingElapsedMs(Date.now() - loadingStartedAt);
+    const intervalId = window.setInterval(() => {
+      setLoadingElapsedMs(Date.now() - loadingStartedAt);
+    }, 100);
 
-    try {
-      const output = await runTool({
-        providerId,
-        apiKey,
-        model,
-        text,
-        tool: selectedTool,
-        values: selectedValues
-      });
+    return () => window.clearInterval(intervalId);
+  }, [loadingStartedAt]);
 
-      const run: RunResult = {
-        id: createRunId(),
-        toolId: selectedTool.id,
-        toolName: selectedTool.name,
-        createdAt: Date.now(),
-        providerId,
-        providerLabel: selectedProvider.label,
-        model,
-        settings: selectedValues,
-        output
-      };
-
-      setResults((current) => [run, ...current]);
-      setActiveResultId(run.id);
-      setAnswersByResult((current) => ({ ...current, [run.id]: {} }));
-    } catch (runError) {
-      setError(runError instanceof Error ? runError.message : String(runError));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const updateValue = (field: ToolField, nextValue: string | number | boolean) => {
-    setValuesByTool((current) => ({
-      ...current,
-      [selectedToolId]: {
-        ...current[selectedToolId],
-        [field.id]: nextValue
-      }
+  useEffect(() => {
+    setSelectedRange((current) => ({
+      start: Math.min(current.start, text.length),
+      end: Math.min(current.end, text.length)
     }));
-  };
+  }, [text]);
 
-  const updateAnswer = (resultId: string, questionIndex: number, answerIndex: number) => {
-    setAnswersByResult((current) => ({
-      ...current,
-      [resultId]: {
-        ...(current[resultId] ?? {}),
-        [questionIndex]: answerIndex
-      }
-    }));
-  };
+  const selectedTool = TOOL_BY_ID[selectedToolId] as ToolDefinition;
+  const rawSelectedValues = valuesByTool[selectedToolId];
+  const selectedValues = useMemo(
+    () => resolveToolValues(selectedTool, rawSelectedValues),
+    [rawSelectedValues, selectedTool]
+  );
+  const customInstructions = customInstructionsByTool[selectedToolId] ?? "";
+  const selectedText = getSelection(text, selectedRange.start, selectedRange.end);
+  const generatedPrompt = selectedTool.buildInstruction({
+    text,
+    selectedText,
+    values: selectedValues,
+    customInstructions
+  });
+  const activePrompt = promptOverridesByTool[selectedToolId] ?? generatedPrompt;
+  const activeResult = results.find((result) => result.id === activeResultId) ?? results[0] ?? null;
+
+  const runLabel =
+    enabledProviderIds.length > 1
+      ? `Vergelijk ${enabledProviderIds.length} modellen`
+      : "Tool uitvoeren";
 
   const quizScore = (() => {
     if (!activeResult?.output.quiz) {
@@ -177,149 +196,299 @@ export const App = () => {
     };
   })();
 
+  const updateValue = (field: ToolField, nextValue: string | number | boolean) => {
+    setValuesByTool((current) => ({
+      ...current,
+      [selectedToolId]: {
+        ...current[selectedToolId],
+        [field.id]: nextValue
+      }
+    }));
+  };
+
+  const updateCustomValue = (fieldId: string, nextValue: string) => {
+    setValuesByTool((current) => ({
+      ...current,
+      [selectedToolId]: {
+        ...current[selectedToolId],
+        [customValueId(fieldId)]: nextValue
+      }
+    }));
+  };
+
+  const toggleProvider = (providerId: ProviderId) => {
+    setEnabledProviderIds((current) =>
+      current.includes(providerId)
+        ? current.filter((item) => item !== providerId)
+        : [...current, providerId]
+    );
+  };
+
+  const updateSelectionFromTextArea = (event: React.SyntheticEvent<HTMLTextAreaElement>) => {
+    const target = event.currentTarget;
+    setSelectedRange({
+      start: target.selectionStart,
+      end: target.selectionEnd
+    });
+  };
+
+  const updateAnswer = (resultId: string, questionIndex: number, answerIndex: number) => {
+    setAnswersByResult((current) => ({
+      ...current,
+      [resultId]: {
+        ...(current[resultId] ?? {}),
+        [questionIndex]: answerIndex
+      }
+    }));
+  };
+
+  const runSelectedTool = async () => {
+    if (!text.trim()) {
+      setError("Plak eerst een tekst in de playground.");
+      return;
+    }
+
+    if (!enabledProviderIds.length) {
+      setError("Selecteer minstens een LLM-aanbieder om te vergelijken.");
+      setActiveTab("llms");
+      return;
+    }
+
+    setLoading(true);
+    setLoadingStartedAt(Date.now());
+    setError(null);
+
+    const settledRuns = await Promise.allSettled(
+      enabledProviderIds.map(async (providerId) => {
+        const provider = PROVIDER_BY_ID[providerId];
+        const apiKey = apiKeysByProvider[providerId] ?? "";
+        const model = modelsByProvider[providerId] ?? provider.defaultModel;
+        const startedAt = performance.now();
+        const output = await runTool({
+          providerId,
+          apiKey,
+          model,
+          tool: selectedTool,
+          instruction: activePrompt,
+          values: selectedValues
+        });
+
+        const run: RunResult = {
+          id: createRunId(),
+          toolId: selectedTool.id,
+          toolName: selectedTool.name,
+          createdAt: Date.now(),
+          providerId,
+          providerLabel: provider.label,
+          model,
+          durationMs: performance.now() - startedAt,
+          prompt: activePrompt,
+          selectedText: selectedText || undefined,
+          settings: selectedValues,
+          output
+        };
+
+        return run;
+      })
+    );
+
+    const successfulRuns: RunResult[] = [];
+    const failedRuns: string[] = [];
+
+    settledRuns.forEach((result, index) => {
+      if (result.status === "fulfilled") {
+        successfulRuns.push(result.value);
+        return;
+      }
+      failedRuns.push(`${PROVIDER_BY_ID[enabledProviderIds[index]].label}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
+    });
+
+    if (successfulRuns.length) {
+      setResults((current) => [...successfulRuns, ...current]);
+      setActiveResultId(successfulRuns[0].id);
+      setAnswersByResult((current) => ({
+        ...current,
+        ...Object.fromEntries(successfulRuns.map((run) => [run.id, {}]))
+      }));
+      setActiveTab("runs");
+    }
+
+    if (failedRuns.length) {
+      setError(failedRuns.join(" "));
+    }
+
+    setLoading(false);
+    setLoadingStartedAt(null);
+  };
+
   return (
     <div className="page-shell">
-      <div className="ambient ambient-left" />
-      <div className="ambient ambient-right" />
       <header className="hero">
         <div>
-          <p className="eyebrow">AI PLAYGROUND VOOR BEGRIJPEND LEZEN</p>
+          <p className="eyebrow">AI playground voor begrAIp</p>
           <h1>BegrAIp</h1>
           <p className="hero-copy">
-            Plak een tekst, kies een tool en laat AI direct lesmateriaal, visualisaties en
-            diagnose-instrumenten genereren.
+            AI playground voor begrAIp om verschillende LLM&apos;s, prompts en outputs te testen.
           </p>
-        </div>
-        <div className="hero-panel">
-          <div className="hero-metric">
-            <strong>9</strong>
-            <span>didactische tools</span>
-          </div>
-          <div className="hero-metric">
-            <strong>1</strong>
-            <span>centrale tekstbron</span>
-          </div>
-          <div className="hero-metric">
-            <strong>∞</strong>
-            <span>variaties per instelling</span>
-          </div>
         </div>
       </header>
 
       <main className="workspace">
-        <aside className="sidebar card">
-          <div className="section-head">
-            <span>Toolset</span>
-            <strong>Kies je werkvorm</strong>
+        <section className="editor-column">
+          <div className="tab-row" role="tablist" aria-label="Hoofdpanelen">
+            {TOP_TABS.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                className={`tab-button ${activeTab === tab.id ? "active" : ""}`}
+                onClick={() => setActiveTab(tab.id)}
+              >
+                {tab.label}
+              </button>
+            ))}
           </div>
 
-          {Object.entries(groupedTools).map(([category, tools]) => (
-            <section className="tool-group" key={category}>
-              <h2>{category}</h2>
-              <div className="tool-list">
-                {tools.map((tool) => (
-                  <button
-                    type="button"
-                    key={tool.id}
-                    className={`tool-card ${tool.id === selectedToolId ? "active" : ""}`}
-                    onClick={() => setSelectedToolId(tool.id)}
-                    style={{ "--tool-accent": tool.accent } as React.CSSProperties}
-                  >
-                    <div className="tool-card-top">
-                      <span className="tool-icon">{tool.icon}</span>
-                      <span className="tool-tag">{tool.category}</span>
-                    </div>
-                    <strong>{tool.name}</strong>
-                    <p>{tool.tagline}</p>
-                  </button>
-                ))}
+          {activeTab === "texts" ? (
+            <div className="card controls-card">
+              <div className="section-head">
+                <span>Tekst</span>
+                <strong>Leespassage en selectie</strong>
               </div>
-            </section>
-          ))}
-        </aside>
-
-        <section className="editor-column">
-          <div className="card controls-card">
-            <div className="section-head">
-              <span>Brontekst</span>
-              <strong>Werk vanuit een centrale leespassage</strong>
-            </div>
-            <div className="provider-grid">
-              <label className="field-stack provider-field">
-                <span>LLM-aanbieder</span>
-                <select
-                  className="text-input"
-                  value={providerId}
-                  onChange={(event) => setProviderId(event.target.value as keyof typeof PROVIDER_BY_ID)}
-                >
-                  {PROVIDERS.map((provider) => (
-                    <option key={provider.id} value={provider.id}>
-                      {provider.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="field-stack provider-field">
-                <span>Model</span>
-                <input
-                  className="text-input"
-                  type="text"
-                  value={model}
-                  onChange={(event) =>
-                    setModelsByProvider((current) => ({
-                      ...current,
-                      [providerId]: event.target.value
-                    }))
-                  }
+              <label className="field-stack">
+                <span>Tekst</span>
+                <textarea
+                  className="text-area"
+                  value={text}
+                  onChange={(event) => setText(event.target.value)}
+                  onSelect={updateSelectionFromTextArea}
+                  onKeyUp={updateSelectionFromTextArea}
+                  onMouseUp={updateSelectionFromTextArea}
+                  spellCheck={false}
                 />
               </label>
-            </div>
-            <label className="field-stack provider-key-panel">
-              <span>{selectedProvider.label} API key</span>
-              <input
-                className="text-input"
-                type="password"
-                placeholder={selectedProvider.keyPlaceholder}
-                value={apiKey}
-                onChange={(event) =>
-                  setApiKeysByProvider((current) => ({
-                    ...current,
-                    [providerId]: event.target.value
-                  }))
-                }
-              />
-              <small>
-                Elke aanbieder bewaart zijn eigen key en model lokaal in deze browser.
-              </small>
-              <small className="provider-warning">
-                Op GitHub Pages draait deze app volledig client-side. Gebruik hier geen gedeelde of
-                permanente productie-keys; zet voor echt veilig gebruik een backend-proxy ertussen.
-              </small>
-            </label>
-            <label className="field-stack">
-              <span>Tekst</span>
-              <textarea
-                className="text-area"
-                value={text}
-                onChange={(event) => setText(event.target.value)}
-                spellCheck={false}
-              />
-            </label>
-            <div className="stats-row">
-              <div>
-                <strong>{text.trim() ? text.trim().split(/\s+/).length : 0}</strong>
-                <span>woorden</span>
+              <div className="stats-row compact">
+                <div>
+                  <strong>{text.trim() ? text.trim().split(/\s+/).length : 0}</strong>
+                  <span>woorden</span>
+                </div>
+                <div>
+                  <strong>{selectedText ? selectedText.split(/\s+/).length : 0}</strong>
+                  <span>geselecteerd</span>
+                </div>
+                <div>
+                  <strong>{results.length}</strong>
+                  <span>runs</span>
+                </div>
               </div>
-              <div>
-                <strong>{text.length}</strong>
-                <span>tekens</span>
-              </div>
-              <div>
-                <strong>{results.length}</strong>
-                <span>runs</span>
+              <div className="selection-panel">
+                <div className="section-head compact">
+                  <span>Selectie</span>
+                  <strong>{selectedText ? "Actieve focuspassage" : "Geen selectie"}</strong>
+                </div>
+                <p>
+                  {selectedText
+                    ? selectedText
+                    : "Selecteer tekst in het veld hierboven. De volledige tekst blijft meegaan naar het model; de selectie wordt apart meegegeven als focus."}
+                </p>
               </div>
             </div>
-          </div>
+          ) : null}
+
+          {activeTab === "llms" ? (
+            <div className="card controls-card">
+              <div className="section-head">
+                <span>LLM selectie</span>
+                <strong>Selecteer een of meer modellen</strong>
+              </div>
+              <div className="provider-stack">
+                {PROVIDERS.map((provider) => {
+                  const enabled = enabledProviderIds.includes(provider.id);
+                  return (
+                    <section className={`provider-card ${enabled ? "active" : ""}`} key={provider.id}>
+                      <label className="provider-toggle">
+                        <input
+                          type="checkbox"
+                          checked={enabled}
+                          onChange={() => toggleProvider(provider.id)}
+                        />
+                        <div>
+                          <strong>{provider.label}</strong>
+                          <p>{provider.supportsImages ? "Tekst en afbeeldingen" : "Tekstoutput, beeldprompts"}</p>
+                        </div>
+                      </label>
+                      <label className="field-stack">
+                        <span>Model</span>
+                        <input
+                          className="text-input"
+                          type="text"
+                          name={`llm-model-${provider.id}`}
+                          autoComplete="off"
+                          autoCorrect="off"
+                          autoCapitalize="none"
+                          spellCheck={false}
+                          value={modelsByProvider[provider.id] ?? provider.defaultModel}
+                          onChange={(event) =>
+                            setModelsByProvider((current) => ({
+                              ...current,
+                              [provider.id]: event.target.value
+                            }))
+                          }
+                        />
+                      </label>
+                      <label className="field-stack">
+                        <span>API key</span>
+                        <input
+                          className="text-input"
+                          type="password"
+                          name={`api-key-${provider.id}`}
+                          autoComplete="new-password"
+                          placeholder={provider.keyPlaceholder}
+                          value={apiKeysByProvider[provider.id] ?? ""}
+                          onChange={(event) =>
+                            setApiKeysByProvider((current) => ({
+                              ...current,
+                              [provider.id]: event.target.value
+                            }))
+                          }
+                        />
+                      </label>
+                    </section>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+
+          {activeTab === "runs" ? (
+            <div className="card controls-card">
+              <div className="section-head">
+                <span>Historie</span>
+                <strong>Recente runs</strong>
+              </div>
+              <div className="history-list">
+                {results.length ? (
+                  results.map((result) => (
+                    <button
+                      type="button"
+                      key={result.id}
+                      className={`history-item ${result.id === activeResultId ? "active" : ""}`}
+                      onClick={() => setActiveResultId(result.id)}
+                    >
+                      <strong>{result.toolName}</strong>
+                      <p>
+                        {result.providerLabel} · {result.model}
+                      </p>
+                      <span>
+                        {formatClockTime(result.createdAt)} · {formatDuration(result.durationMs)}
+                      </span>
+                    </button>
+                  ))
+                ) : (
+                  <div className="empty-history">Nog geen runs opgeslagen.</div>
+                )}
+              </div>
+            </div>
+          ) : null}
 
           <div className="card config-card">
             <div className="config-header">
@@ -327,16 +496,48 @@ export const App = () => {
                 <p className="eyebrow small">Actieve tool</p>
                 <h2>{selectedTool.name}</h2>
                 <p>{selectedTool.description}</p>
-                {selectedTool.outputKind === "images" && !selectedProvider.supportsImages ? (
-                  <div className="provider-note">
-                    {selectedProvider.label} genereert hier wel beeldprompts, maar geen echte afbeeldingen.
-                    Kies `OpenAI` als je direct beelden wilt laten renderen.
-                  </div>
-                ) : null}
               </div>
-              <button type="button" className="run-button" onClick={runSelectedTool} disabled={loading}>
-                {loading ? "Bezig..." : "Tool uitvoeren"}
-              </button>
+              <div className="run-panel">
+                <button type="button" className="run-button" onClick={runSelectedTool} disabled={loading}>
+                  {loading ? "Bezig..." : runLabel}
+                </button>
+                <div className={`progress-chip ${loading ? "active" : ""}`}>
+                  <span>{loading ? "Bezig met genereren" : "Klaar voor run"}</span>
+                  <strong>{loading ? formatDuration(loadingElapsedMs) : `${enabledProviderIds.length} model${enabledProviderIds.length === 1 ? "" : "len"}`}</strong>
+                </div>
+              </div>
+            </div>
+
+            <div className="tool-select-row">
+              <label className="field-stack">
+                <span>Tool</span>
+                <select
+                  className="text-input"
+                  value={selectedToolId}
+                  onChange={(event) => setSelectedToolId(event.target.value)}
+                >
+                  {Object.entries(
+                    TOOL_CATALOG.reduce<Record<string, ToolDefinition[]>>((accumulator, tool) => {
+                      accumulator[tool.category] ??= [];
+                      accumulator[tool.category].push(tool);
+                      return accumulator;
+                    }, {})
+                  ).map(([category, tools]) => (
+                    <optgroup label={category} key={category}>
+                      {tools.map((tool) => (
+                        <option value={tool.id} key={tool.id}>
+                          {tool.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+              </label>
+              <div className="provider-note">
+                {enabledProviderIds.length > 1
+                  ? "Deze run wordt parallel uitgevoerd voor alle geselecteerde modellen, zodat je outputs direct kunt vergelijken."
+                  : "Selecteer extra modellen in LLM settings om parallel te vergelijken."}
+              </div>
             </div>
 
             <div className="settings-grid">
@@ -351,38 +552,102 @@ export const App = () => {
                         min={field.min}
                         max={field.max}
                         step={field.step ?? 1}
-                        value={Number(selectedValues[field.id])}
+                        value={Number(rawSelectedValues[field.id])}
                         onChange={(event) => updateValue(field, Number(event.target.value))}
                       />
                     ) : null}
                     {field.type === "select" ? (
-                      <select
-                        className="text-input"
-                        value={String(selectedValues[field.id])}
-                        onChange={(event) => updateValue(field, event.target.value)}
-                      >
-                        {field.options?.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
+                      <>
+                        <select
+                          className="text-input"
+                          value={String(rawSelectedValues[field.id])}
+                          onChange={(event) => updateValue(field, event.target.value)}
+                        >
+                          {field.options?.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                        <input
+                          className="text-input custom-option-input"
+                          type="text"
+                          placeholder="Anders, namelijk..."
+                          value={String(rawSelectedValues[customValueId(field.id)] ?? "")}
+                          onChange={(event) => updateCustomValue(field.id, event.target.value)}
+                        />
+                      </>
                     ) : null}
                     {field.type === "toggle" ? (
                       <button
                         type="button"
-                        className={`toggle ${selectedValues[field.id] ? "on" : ""}`}
-                        onClick={() => updateValue(field, !selectedValues[field.id])}
+                        className={`toggle ${rawSelectedValues[field.id] ? "on" : ""}`}
+                        onClick={() => updateValue(field, !rawSelectedValues[field.id])}
                       >
                         <span className="toggle-knob" />
-                        <span>{selectedValues[field.id] ? "Aan" : "Uit"}</span>
+                        <span>{rawSelectedValues[field.id] ? "Aan" : "Uit"}</span>
                       </button>
+                    ) : null}
+                    {field.type === "textarea" ? (
+                      <textarea
+                        className="text-area setting-textarea"
+                        value={String(rawSelectedValues[field.id] ?? "")}
+                        onChange={(event) => updateValue(field, event.target.value)}
+                      />
                     ) : null}
                   </div>
                   <small className="setting-help">{field.description ?? "\u00a0"}</small>
                 </label>
               ))}
             </div>
+
+            <label className="field-stack prompt-field">
+              <span>Extra instructies voor deze tool</span>
+              <textarea
+                className="text-area prompt-textarea"
+                placeholder="Voeg optionele didactische of inhoudelijke instructies toe."
+                value={customInstructions}
+                onChange={(event) =>
+                  setCustomInstructionsByTool((current) => ({
+                    ...current,
+                    [selectedToolId]: event.target.value
+                  }))
+                }
+              />
+            </label>
+
+            <details className="prompt-details" open>
+              <summary>Prompt onder de motorkap</summary>
+              <label className="field-stack prompt-field">
+                <span>Deze prompt wordt naar het model gestuurd</span>
+                <textarea
+                  className="text-area prompt-textarea prompt-preview"
+                  value={activePrompt}
+                  onChange={(event) =>
+                    setPromptOverridesByTool((current) => ({
+                      ...current,
+                      [selectedToolId]: event.target.value
+                    }))
+                  }
+                />
+              </label>
+              <div className="prompt-actions">
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() =>
+                    setPromptOverridesByTool((current) => {
+                      const next = { ...current };
+                      delete next[selectedToolId];
+                      return next;
+                    })
+                  }
+                >
+                  Reset naar gegenereerde prompt
+                </button>
+                <span>{promptOverridesByTool[selectedToolId] ? "Aangepaste prompt actief" : "Automatisch gegenereerde prompt actief"}</span>
+              </div>
+            </details>
 
             {error ? <div className="error-banner">{error}</div> : null}
           </div>
@@ -391,8 +656,8 @@ export const App = () => {
         <aside className="results-column">
           <div className="card result-card">
             <div className="section-head">
-              <span>Resultaten</span>
-              <strong>Actieve output</strong>
+              <span>Output</span>
+              <strong>Actieve run</strong>
             </div>
 
             {activeResult ? (
@@ -405,17 +670,28 @@ export const App = () => {
                     <h2>{activeResult.output.title}</h2>
                     <p>{activeResult.output.summary}</p>
                   </div>
-                  <time>{new Date(activeResult.createdAt).toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit" })}</time>
+                  <div className="result-timing">
+                    <time>{formatClockTime(activeResult.createdAt)}</time>
+                    <strong>{formatDuration(activeResult.durationMs)}</strong>
+                  </div>
                 </div>
 
                 <div className="pill-row">
                   <span className="pill">Model: {activeResult.model}</span>
+                  {activeResult.selectedText ? <span className="pill">Selectie actief</span> : null}
                   {TOOL_BY_ID[activeResult.toolId].fields.map((field) => (
                     <span key={field.id} className="pill">
                       {field.label}: {formatSetting(field, activeResult.settings[field.id])}
                     </span>
                   ))}
                 </div>
+
+                {activeResult.selectedText ? (
+                  <section className="content-block selection-result">
+                    <h3>Geselecteerde passage</h3>
+                    <p>{activeResult.selectedText}</p>
+                  </section>
+                ) : null}
 
                 {activeResult.output.sections?.map((section) => (
                   <section className="content-block" key={section.label}>
@@ -459,7 +735,9 @@ export const App = () => {
                     <div className="image-grid">
                       {activeResult.output.images.map((image) => (
                         <article className="image-card" key={image.title}>
-                          <div className="image-frame">
+                          <div
+                            className={`image-frame ${image.aspectRatio === "1024x1536" ? "portrait" : image.aspectRatio === "1024x1024" ? "square" : "landscape"}`}
+                          >
                             {image.imageUrl ? (
                               <img src={image.imageUrl} alt={image.alt} />
                             ) : (
@@ -532,44 +810,22 @@ export const App = () => {
                     </div>
                   </section>
                 ) : null}
+
+                <details className="prompt-details result-prompt">
+                  <summary>Bekijk gebruikte prompt</summary>
+                  <pre>{activeResult.prompt}</pre>
+                </details>
               </>
             ) : (
               <div className="empty-state">
-                <strong>Nog geen output</strong>
-                <p>Voer links een tool uit om hier het resultaat te zien.</p>
+                <strong>{loading ? "Run bezig" : "Nog geen output"}</strong>
+                <p>
+                  {loading
+                    ? `De geselecteerde modellen zijn bezig. Huidige looptijd: ${formatDuration(loadingElapsedMs)}.`
+                    : "Voer links een tool uit om hier het resultaat te zien."}
+                </p>
               </div>
             )}
-          </div>
-
-          <div className="card history-card">
-            <div className="section-head">
-              <span>Historie</span>
-              <strong>Recente runs</strong>
-            </div>
-
-            <div className="history-list">
-              {results.length ? (
-                results.map((result) => (
-                  <button
-                    type="button"
-                    key={result.id}
-                    className={`history-item ${result.id === activeResultId ? "active" : ""}`}
-                    onClick={() => setActiveResultId(result.id)}
-                  >
-                    <strong>{result.toolName}</strong>
-                    <p>{result.output.title}</p>
-                    <span>
-                      {new Date(result.createdAt).toLocaleTimeString("nl-NL", {
-                        hour: "2-digit",
-                        minute: "2-digit"
-                      })}
-                    </span>
-                  </button>
-                ))
-              ) : (
-                <div className="empty-history">Nog geen runs opgeslagen.</div>
-              )}
-            </div>
           </div>
         </aside>
       </main>

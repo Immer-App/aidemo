@@ -29,7 +29,9 @@ export type ToolDefinition = {
   defaults: Record<string, string | number | boolean>;
   buildInstruction: (input: {
     text: string;
+    selectedText?: string;
     values: Record<string, string | number | boolean>;
+    customInstructions?: string;
   }) => string;
 };
 
@@ -51,6 +53,7 @@ export type ImageAsset = {
   title: string;
   prompt: string;
   alt: string;
+  aspectRatio?: string;
   imageUrl?: string;
   imageError?: string;
 };
@@ -77,6 +80,9 @@ export type RunResult = {
   providerId: string;
   providerLabel: string;
   model: string;
+  durationMs: number;
+  prompt: string;
+  selectedText?: string;
   settings: Record<string, string | number | boolean>;
   output: ToolOutput;
 };

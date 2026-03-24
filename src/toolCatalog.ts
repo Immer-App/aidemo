@@ -3,6 +3,22 @@ import type { ToolDefinition } from "./types";
 const asNumber = (value: string | number | boolean): number => Number(value);
 const asText = (value: string | number | boolean): string => String(value);
 const asBool = (value: string | number | boolean): boolean => Boolean(value);
+const withSharedContext = (
+  body: string,
+  selectedText?: string,
+  customInstructions?: string
+) => `${body}
+
+${selectedText?.trim()
+    ? `Geselecteerde passage:
+"""${selectedText.trim()}"""
+
+Behandel de volledige tekst als hoofdcontext, maar leg in je antwoord extra nadruk op deze selectie.`
+    : "Er is geen aparte selectie opgegeven. Gebruik de volledige tekst als context."}
+${customInstructions?.trim() ? `
+
+Extra instructies van de gebruiker:
+${customInstructions.trim()}` : ""}`;
 
 export const TOOL_CATALOG: ToolDefinition[] = [
   {
@@ -49,7 +65,8 @@ export const TOOL_CATALOG: ToolDefinition[] = [
       difficulty: "gemiddeld",
       explanations: true
     },
-    buildInstruction: ({ text, values }) => `Maak een multiple-choicequiz over deze tekst.
+    buildInstruction: ({ text, selectedText, values, customInstructions }) =>
+      withSharedContext(`Maak een multiple-choicequiz over deze tekst.
 
 Tekst:
 ${text}
@@ -82,7 +99,7 @@ Geef alleen geldige JSON in dit formaat:
       }
     ]
   }
-}`
+}`, selectedText, customInstructions)
   },
   {
     id: "image-generator",
@@ -134,7 +151,8 @@ Geef alleen geldige JSON in dit formaat:
       style: "educatieve illustratie",
       aspect: "1536x1024"
     },
-    buildInstruction: ({ text, values }) => `Analyseer de tekst en maak een beeldplan.
+    buildInstruction: ({ text, selectedText, values, customInstructions }) =>
+      withSharedContext(`Analyseer de tekst en maak een beeldplan.
 
 Tekst:
 ${text}
@@ -145,9 +163,9 @@ Instellingen:
 - stijl: ${asText(values.style)}
 
 Vereisten:
-- geef korte, educatief bruikbare titels
+- geef korte, educatief bruikbare titels in natuurlijk Nederlands en in zinshoofdletters
 - beschrijf wat leerlingen in elk beeld moeten herkennen
-- schrijf elke afbeeldingsprompt in het Engels
+- schrijf elke afbeeldingsprompt in het Nederlands
 - prompts moeten geschikt zijn voor een image model en expliciet de stijl "${asText(values.style)}" verwerken
 
 Geef alleen geldige JSON in dit formaat:
@@ -162,7 +180,7 @@ Geef alleen geldige JSON in dit formaat:
       "alt": "string"
     }
   ]
-}`
+}`, selectedText, customInstructions)
   },
   {
     id: "prior-knowledge",
@@ -202,7 +220,8 @@ Geef alleen geldige JSON in dit formaat:
       scope: "onderwerp",
       level: "basisschool bovenbouw"
     },
-    buildInstruction: ({ text, values }) => `Genereer een quiz die voorkennis toetst voordat iemand de tekst leest.
+    buildInstruction: ({ text, selectedText, values, customInstructions }) =>
+      withSharedContext(`Genereer een quiz die voorkennis toetst voordat iemand de tekst leest.
 
 Tekst:
 ${text}
@@ -234,7 +253,7 @@ Geef alleen geldige JSON in dit formaat:
       }
     ]
   }
-}`
+}`, selectedText, customInstructions)
   },
   {
     id: "glossary",
@@ -282,7 +301,8 @@ Geef alleen geldige JSON in dit formaat:
       definitionStyle: "kort en simpel",
       includeExample: true
     },
-    buildInstruction: ({ text, values }) => `Maak een woordenlijst bij de tekst.
+    buildInstruction: ({ text, selectedText, values, customInstructions }) =>
+      withSharedContext(`Maak een woordenlijst bij de tekst.
 
 Tekst:
 ${text}
@@ -310,7 +330,7 @@ Geef alleen geldige JSON in dit formaat:
       "example": "string"
     }
   ]
-}`
+}`, selectedText, customInstructions)
   },
   {
     id: "summary",
@@ -359,7 +379,8 @@ Geef alleen geldige JSON in dit formaat:
       readerLevel: "gemiddeld",
       format: "stap voor stap"
     },
-    buildInstruction: ({ text, values }) => `Vat de tekst samen.
+    buildInstruction: ({ text, selectedText, values, customInstructions }) =>
+      withSharedContext(`Vat de tekst samen.
 
 Tekst:
 ${text}
@@ -378,7 +399,7 @@ Geef alleen geldige JSON in dit formaat:
     { "label": "Belangrijkste details", "body": "string" }
   ],
   "bullets": ["string"]
-}`
+}`, selectedText, customInstructions)
   },
   {
     id: "timeline",
@@ -411,7 +432,8 @@ Geef alleen geldige JSON in dit formaat:
       granularity: "gebalanceerd",
       includeCauseEffect: true
     },
-    buildInstruction: ({ text, values }) => `Maak een tijdlijn van de tekst.
+    buildInstruction: ({ text, selectedText, values, customInstructions }) =>
+      withSharedContext(`Maak een tijdlijn van de tekst.
 
 Tekst:
 ${text}
@@ -429,7 +451,7 @@ Geef alleen geldige JSON in dit formaat:
     { "label": "Oorzaak en gevolg", "body": "string" }
   ],
   "bullets": ["string"]
-}`
+}`, selectedText, customInstructions)
   },
   {
     id: "character-map",
@@ -465,7 +487,8 @@ Geef alleen geldige JSON in dit formaat:
       focus: "relaties",
       characterCount: 4
     },
-    buildInstruction: ({ text, values }) => `Analyseer de personages in de tekst.
+    buildInstruction: ({ text, selectedText, values, customInstructions }) =>
+      withSharedContext(`Analyseer de personages in de tekst.
 
 Tekst:
 ${text}
@@ -483,7 +506,7 @@ Geef alleen geldige JSON in dit formaat:
     { "label": "Relaties", "body": "string" }
   ],
   "bullets": ["string"]
-}`
+}`, selectedText, customInstructions)
   },
   {
     id: "text-structure",
@@ -516,7 +539,8 @@ Geef alleen geldige JSON in dit formaat:
       structureType: "beide",
       includeTips: true
     },
-    buildInstruction: ({ text, values }) => `Analyseer de structuur van de tekst.
+    buildInstruction: ({ text, selectedText, values, customInstructions }) =>
+      withSharedContext(`Analyseer de structuur van de tekst.
 
 Tekst:
 ${text}
@@ -535,7 +559,7 @@ Geef alleen geldige JSON in dit formaat:
     { "label": "Leestips", "body": "string" }
   ],
   "bullets": ["string"]
-}`
+}`, selectedText, customInstructions)
   },
   {
     id: "open-questions",
@@ -564,7 +588,8 @@ Geef alleen geldige JSON in dit formaat:
       questionCount: 4,
       thinkingLevel: "interpreteren"
     },
-    buildInstruction: ({ text, values }) => `Maak open vragen bij de tekst.
+    buildInstruction: ({ text, selectedText, values, customInstructions }) =>
+      withSharedContext(`Maak open vragen bij de tekst.
 
 Tekst:
 ${text}
@@ -582,7 +607,47 @@ Geef alleen geldige JSON in dit formaat:
     { "label": "Nakijkmodel", "body": "string" }
   ],
   "bullets": ["string"]
-}`
+}`, selectedText, customInstructions)
+  },
+  {
+    id: "custom-prompt",
+    name: "Custom prompt",
+    tagline: "Probeer een eigen opdracht op dezelfde tekst en selectie.",
+    description:
+      "Gebruik een vrije prompt om modellen, instructies en formuleringen direct te vergelijken.",
+    category: "Experiment",
+    accent: "#0f8f7a",
+    icon: "10",
+    outputKind: "report",
+    fields: [
+      {
+        id: "task",
+        label: "Opdracht",
+        type: "textarea",
+        description: "Beschrijf wat het model met de tekst moet doen."
+      }
+    ],
+    defaults: {
+      task: "Geef een korte analyse van deze tekst voor een docent begrijpend lezen."
+    },
+    buildInstruction: ({ text, selectedText, values, customInstructions }) =>
+      withSharedContext(`Voer deze eigen opdracht uit op basis van de tekst.
+
+Tekst:
+${text}
+
+Opdracht:
+${asText(values.task)}
+
+Geef alleen geldige JSON in dit formaat:
+{
+  "title": "string",
+  "summary": "string",
+  "sections": [
+    { "label": "Antwoord", "body": "string" }
+  ],
+  "bullets": ["string"]
+}`, selectedText, customInstructions)
   }
 ];
 
