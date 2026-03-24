@@ -311,6 +311,10 @@ button {
   line-height: 1.45;
 }
 
+.provider-warning {
+  color: #8a5b14;
+}
+
 .field-panel {
   padding: 16px;
   border: 1px solid #e8ebef;

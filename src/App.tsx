@@ -291,6 +291,10 @@ export const App = () => {
               <small>
                 Elke aanbieder bewaart zijn eigen key en model lokaal in deze browser.
               </small>
+              <small className="provider-warning">
+                Op GitHub Pages draait deze app volledig client-side. Gebruik hier geen gedeelde of
+                permanente productie-keys; zet voor echt veilig gebruik een backend-proxy ertussen.
+              </small>
             </label>
             <label className="field-stack">
               <span>Tekst</span>

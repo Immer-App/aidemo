@@ -38,3 +38,13 @@ npm run dev
 ```bash
 npm run build
 ```
+
+## GitHub Pages
+
+Deze repo bevat een GitHub Actions workflow voor deployment naar GitHub Pages.
+
+Belangrijk:
+
+- GitHub Pages is een statische host
+- API-keys die je in de front-end stopt zijn publiek zichtbaar
+- gebruik daarom op de hosted versie alleen eigen tijdelijke keys of zet een backend-proxy voor de modelproviders
