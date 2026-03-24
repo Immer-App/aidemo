@@ -1,0 +1,82 @@
+export type FieldType = "number" | "select" | "toggle" | "textarea";
+
+export type FieldOption = {
+  label: string;
+  value: string;
+};
+
+export type ToolField = {
+  id: string;
+  label: string;
+  type: FieldType;
+  min?: number;
+  max?: number;
+  step?: number;
+  options?: FieldOption[];
+  description?: string;
+};
+
+export type ToolDefinition = {
+  id: string;
+  name: string;
+  tagline: string;
+  description: string;
+  category: string;
+  accent: string;
+  icon: string;
+  outputKind: "quiz" | "glossary" | "images" | "report";
+  fields: ToolField[];
+  defaults: Record<string, string | number | boolean>;
+  buildInstruction: (input: {
+    text: string;
+    values: Record<string, string | number | boolean>;
+  }) => string;
+};
+
+export type QuizQuestion = {
+  prompt: string;
+  choices: string[];
+  correctIndex: number;
+  explanation?: string;
+};
+
+export type GlossaryEntry = {
+  term: string;
+  definition: string;
+  category?: string;
+  example?: string;
+};
+
+export type ImageAsset = {
+  title: string;
+  prompt: string;
+  alt: string;
+  imageUrl?: string;
+  imageError?: string;
+};
+
+export type ToolOutput = {
+  title: string;
+  summary: string;
+  sections?: Array<{ label: string; body: string }>;
+  bullets?: string[];
+  quiz?: {
+    title: string;
+    instructions?: string;
+    questions: QuizQuestion[];
+  };
+  glossary?: GlossaryEntry[];
+  images?: ImageAsset[];
+};
+
+export type RunResult = {
+  id: string;
+  toolId: string;
+  toolName: string;
+  createdAt: number;
+  providerId: string;
+  providerLabel: string;
+  model: string;
+  settings: Record<string, string | number | boolean>;
+  output: ToolOutput;
+};
