@@ -6,7 +6,8 @@ const asBool = (value: string | number | boolean): boolean => Boolean(value);
 const withSharedContext = (
   body: string,
   selectedText?: string,
-  customInstructions?: string
+  customInstructions?: string,
+  tokenMap?: string
 ) => `${body}
 
 ${selectedText?.trim()
@@ -15,6 +16,10 @@ ${selectedText?.trim()
 
 Behandel de volledige tekst als hoofdcontext, maar leg in je antwoord extra nadruk op deze selectie.`
     : "Er is geen aparte selectie opgegeven. Gebruik de volledige tekst als context."}
+${tokenMap?.trim() ? `
+
+Tokenlijst voor eventuele annotaties:
+${tokenMap.trim()}` : ""}
 ${customInstructions?.trim() ? `
 
 Extra instructies van de gebruiker:
@@ -65,7 +70,7 @@ export const TOOL_CATALOG: ToolDefinition[] = [
       difficulty: "gemiddeld",
       explanations: true
     },
-    buildInstruction: ({ text, selectedText, values, customInstructions }) =>
+    buildInstruction: ({ text, selectedText, values, customInstructions, tokenMap }) =>
       withSharedContext(`Maak een multiple-choicequiz over deze tekst.
 
 Tekst:
@@ -99,7 +104,7 @@ Geef alleen geldige JSON in dit formaat:
       }
     ]
   }
-}`, selectedText, customInstructions)
+}`, selectedText, customInstructions, tokenMap)
   },
   {
     id: "image-generator",
@@ -151,7 +156,7 @@ Geef alleen geldige JSON in dit formaat:
       style: "educatieve illustratie",
       aspect: "1536x1024"
     },
-    buildInstruction: ({ text, selectedText, values, customInstructions }) =>
+    buildInstruction: ({ text, selectedText, values, customInstructions, tokenMap }) =>
       withSharedContext(`Analyseer de tekst en maak een beeldplan.
 
 Tekst:
@@ -180,7 +185,7 @@ Geef alleen geldige JSON in dit formaat:
       "alt": "string"
     }
   ]
-}`, selectedText, customInstructions)
+}`, selectedText, customInstructions, tokenMap)
   },
   {
     id: "prior-knowledge",
@@ -220,7 +225,7 @@ Geef alleen geldige JSON in dit formaat:
       scope: "onderwerp",
       level: "basisschool bovenbouw"
     },
-    buildInstruction: ({ text, selectedText, values, customInstructions }) =>
+    buildInstruction: ({ text, selectedText, values, customInstructions, tokenMap }) =>
       withSharedContext(`Genereer een quiz die voorkennis toetst voordat iemand de tekst leest.
 
 Tekst:
@@ -253,7 +258,7 @@ Geef alleen geldige JSON in dit formaat:
       }
     ]
   }
-}`, selectedText, customInstructions)
+}`, selectedText, customInstructions, tokenMap)
   },
   {
     id: "glossary",
@@ -301,7 +306,7 @@ Geef alleen geldige JSON in dit formaat:
       definitionStyle: "kort en simpel",
       includeExample: true
     },
-    buildInstruction: ({ text, selectedText, values, customInstructions }) =>
+    buildInstruction: ({ text, selectedText, values, customInstructions, tokenMap }) =>
       withSharedContext(`Maak een woordenlijst bij de tekst.
 
 Tekst:
@@ -330,7 +335,7 @@ Geef alleen geldige JSON in dit formaat:
       "example": "string"
     }
   ]
-}`, selectedText, customInstructions)
+}`, selectedText, customInstructions, tokenMap)
   },
   {
     id: "summary",
@@ -379,7 +384,7 @@ Geef alleen geldige JSON in dit formaat:
       readerLevel: "gemiddeld",
       format: "stap voor stap"
     },
-    buildInstruction: ({ text, selectedText, values, customInstructions }) =>
+    buildInstruction: ({ text, selectedText, values, customInstructions, tokenMap }) =>
       withSharedContext(`Vat de tekst samen.
 
 Tekst:
@@ -399,7 +404,7 @@ Geef alleen geldige JSON in dit formaat:
     { "label": "Belangrijkste details", "body": "string" }
   ],
   "bullets": ["string"]
-}`, selectedText, customInstructions)
+}`, selectedText, customInstructions, tokenMap)
   },
   {
     id: "timeline",
@@ -432,7 +437,7 @@ Geef alleen geldige JSON in dit formaat:
       granularity: "gebalanceerd",
       includeCauseEffect: true
     },
-    buildInstruction: ({ text, selectedText, values, customInstructions }) =>
+    buildInstruction: ({ text, selectedText, values, customInstructions, tokenMap }) =>
       withSharedContext(`Maak een tijdlijn van de tekst.
 
 Tekst:
@@ -451,7 +456,7 @@ Geef alleen geldige JSON in dit formaat:
     { "label": "Oorzaak en gevolg", "body": "string" }
   ],
   "bullets": ["string"]
-}`, selectedText, customInstructions)
+}`, selectedText, customInstructions, tokenMap)
   },
   {
     id: "character-map",
@@ -487,7 +492,7 @@ Geef alleen geldige JSON in dit formaat:
       focus: "relaties",
       characterCount: 4
     },
-    buildInstruction: ({ text, selectedText, values, customInstructions }) =>
+    buildInstruction: ({ text, selectedText, values, customInstructions, tokenMap }) =>
       withSharedContext(`Analyseer de personages in de tekst.
 
 Tekst:
@@ -506,7 +511,7 @@ Geef alleen geldige JSON in dit formaat:
     { "label": "Relaties", "body": "string" }
   ],
   "bullets": ["string"]
-}`, selectedText, customInstructions)
+}`, selectedText, customInstructions, tokenMap)
   },
   {
     id: "text-structure",
@@ -539,7 +544,7 @@ Geef alleen geldige JSON in dit formaat:
       structureType: "beide",
       includeTips: true
     },
-    buildInstruction: ({ text, selectedText, values, customInstructions }) =>
+    buildInstruction: ({ text, selectedText, values, customInstructions, tokenMap }) =>
       withSharedContext(`Analyseer de structuur van de tekst.
 
 Tekst:
@@ -559,7 +564,64 @@ Geef alleen geldige JSON in dit formaat:
     { "label": "Leestips", "body": "string" }
   ],
   "bullets": ["string"]
-}`, selectedText, customInstructions)
+}`, selectedText, customInstructions, tokenMap)
+  },
+  {
+    id: "word-highlighter",
+    name: "Woordsoorten markeren",
+    tagline: "Laat woorden in de brontekst kleurcodes krijgen.",
+    description:
+      "Vraagt het model om token-id's terug te geven zodat woorden in de invoertekst gemarkeerd kunnen worden.",
+    category: "Analyse",
+    accent: "#2f8f6b",
+    icon: "09",
+    outputKind: "report",
+    fields: [
+      {
+        id: "focus",
+        label: "Markeer",
+        type: "select",
+        options: [
+          { label: "Zelfstandige naamwoorden, werkwoorden, bijvoeglijke naamwoorden", value: "znw-ww-bvnw" },
+          { label: "Alleen werkwoorden", value: "werkwoorden" },
+          { label: "Alleen zelfstandige naamwoorden", value: "zelfstandige naamwoorden" },
+          { label: "Alleen bijvoeglijke naamwoorden", value: "bijvoeglijke naamwoorden" }
+        ]
+      }
+    ],
+    defaults: {
+      focus: "znw-ww-bvnw"
+    },
+    buildInstruction: ({ text, selectedText, values, customInstructions, tokenMap }) =>
+      withSharedContext(`Analyseer de tekst en geef markeringen terug voor woorden in de brontekst.
+
+Tekst:
+${text}
+
+Instellingen:
+- markeer: ${asText(values.focus)}
+
+Vereisten:
+- gebruik uitsluitend tokenIds uit de meegeleverde tokenlijst
+- geef per woordsoort een aparte highlight-groep terug
+- gebruik kleuren "noun", "verb" en "adjective"
+- laat tokenIds alleen verwijzen naar woorden die echt in de tekst voorkomen
+
+Geef alleen geldige JSON in dit formaat:
+{
+  "title": "string",
+  "summary": "string",
+  "sections": [
+    { "label": "Legenda", "body": "string" }
+  ],
+  "highlights": [
+    {
+      "label": "Zelfstandige naamwoorden",
+      "color": "noun",
+      "tokenIds": [1, 4, 10]
+    }
+  ]
+}`, selectedText, customInstructions, tokenMap)
   },
   {
     id: "open-questions",
@@ -569,7 +631,7 @@ Geef alleen geldige JSON in dit formaat:
       "Maakt open vragen over de tekst en geeft criteria voor een sterk antwoord.",
     category: "Verwerking",
     accent: "#ffa113",
-    icon: "09",
+    icon: "10",
     outputKind: "report",
     fields: [
       { id: "questionCount", label: "Aantal vragen", type: "number", min: 2, max: 8, step: 1 },
@@ -588,7 +650,7 @@ Geef alleen geldige JSON in dit formaat:
       questionCount: 4,
       thinkingLevel: "interpreteren"
     },
-    buildInstruction: ({ text, selectedText, values, customInstructions }) =>
+    buildInstruction: ({ text, selectedText, values, customInstructions, tokenMap }) =>
       withSharedContext(`Maak open vragen bij de tekst.
 
 Tekst:
@@ -607,7 +669,7 @@ Geef alleen geldige JSON in dit formaat:
     { "label": "Nakijkmodel", "body": "string" }
   ],
   "bullets": ["string"]
-}`, selectedText, customInstructions)
+}`, selectedText, customInstructions, tokenMap)
   },
   {
     id: "custom-prompt",
@@ -617,7 +679,7 @@ Geef alleen geldige JSON in dit formaat:
       "Gebruik een vrije prompt om modellen, instructies en formuleringen direct te vergelijken.",
     category: "Experiment",
     accent: "#0f8f7a",
-    icon: "10",
+    icon: "11",
     outputKind: "report",
     fields: [
       {
@@ -630,7 +692,7 @@ Geef alleen geldige JSON in dit formaat:
     defaults: {
       task: "Geef een korte analyse van deze tekst voor een docent begrijpend lezen."
     },
-    buildInstruction: ({ text, selectedText, values, customInstructions }) =>
+    buildInstruction: ({ text, selectedText, values, customInstructions, tokenMap }) =>
       withSharedContext(`Voer deze eigen opdracht uit op basis van de tekst.
 
 Tekst:
@@ -647,7 +709,7 @@ Geef alleen geldige JSON in dit formaat:
     { "label": "Antwoord", "body": "string" }
   ],
   "bullets": ["string"]
-}`, selectedText, customInstructions)
+}`, selectedText, customInstructions, tokenMap)
   }
 ];
 

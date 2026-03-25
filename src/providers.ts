@@ -1,4 +1,4 @@
-import type { ImageAsset, ToolDefinition, ToolOutput } from "./types";
+import type { ImageAsset, QuizQuestion, ToolDefinition, ToolOutput } from "./types";
 
 export type ProviderId = "openai" | "anthropic" | "google" | "mistral" | "groq";
 
@@ -21,13 +21,93 @@ Je schrijft in helder Nederlands.
 Je volgt de gevraagde instellingen exact.
 Je antwoordt uitsluitend met geldige JSON zonder markdown of extra toelichting.`;
 
-const cleanJson = (text: string): string =>
-  text
+const cleanJson = (text: string): string => {
+  const stripped = text
     .replace(/```json/gi, "")
     .replace(/```/g, "")
     .trim();
+  const firstBrace = stripped.indexOf("{");
+  const lastBrace = stripped.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    return stripped.slice(firstBrace, lastBrace + 1);
+  }
+  return stripped;
+};
 
 const parseToolOutput = (raw: string): ToolOutput => JSON.parse(cleanJson(raw)) as ToolOutput;
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;
+
+const isValidQuizQuestion = (value: unknown): value is QuizQuestion =>
+  isRecord(value) &&
+  typeof value.prompt === "string" &&
+  Array.isArray(value.choices) &&
+  value.choices.every((choice) => typeof choice === "string") &&
+  typeof value.correctIndex === "number";
+
+const normalizeToolOutput = (output: ToolOutput, tool: ToolDefinition): ToolOutput => {
+  const normalized: ToolOutput = {
+    title: typeof output.title === "string" ? output.title : tool.name,
+    summary: typeof output.summary === "string" ? output.summary : "",
+    sections: Array.isArray(output.sections)
+      ? output.sections.filter(
+          (section): section is { label: string; body: string } =>
+            isRecord(section) &&
+            typeof section.label === "string" &&
+            typeof section.body === "string"
+        )
+      : undefined,
+    bullets: Array.isArray(output.bullets)
+      ? output.bullets.filter((bullet): bullet is string => typeof bullet === "string")
+      : undefined,
+    highlights: Array.isArray(output.highlights)
+      ? output.highlights.filter(
+          (highlight): highlight is { label: string; color: string; tokenIds: number[] } =>
+            isRecord(highlight) &&
+            typeof highlight.label === "string" &&
+            typeof highlight.color === "string" &&
+            Array.isArray(highlight.tokenIds) &&
+            highlight.tokenIds.every((tokenId) => typeof tokenId === "number")
+        )
+      : undefined,
+    glossary: Array.isArray(output.glossary)
+      ? output.glossary.filter(
+          (item): item is NonNullable<ToolOutput["glossary"]>[number] =>
+            isRecord(item) &&
+            typeof item.term === "string" &&
+            typeof item.definition === "string"
+        )
+      : undefined,
+    images: Array.isArray(output.images)
+      ? output.images.filter(
+          (image): image is NonNullable<ToolOutput["images"]>[number] =>
+            isRecord(image) &&
+            typeof image.title === "string" &&
+            typeof image.prompt === "string" &&
+            typeof image.alt === "string"
+        )
+      : undefined,
+    quiz:
+      isRecord(output.quiz) &&
+      typeof output.quiz.title === "string" &&
+      Array.isArray(output.quiz.questions)
+        ? {
+            title: output.quiz.title,
+            instructions:
+              typeof output.quiz.instructions === "string" ? output.quiz.instructions : undefined,
+            questions: output.quiz.questions.filter(isValidQuizQuestion)
+          }
+        : undefined
+  };
+
+  if (tool.outputKind === "quiz" && (!normalized.quiz || normalized.quiz.questions.length === 0)) {
+    throw new Error(
+      `${tool.name} gaf ongeldige JSON terug: quizvragen of antwoordopties ontbreken.`
+    );
+  }
+
+  return normalized;
+};
 
 const ensureApiKey = (apiKey: string, providerLabel: string) => {
   if (!apiKey.trim()) {
@@ -321,7 +401,7 @@ export const runTool = async (input: {
     instruction: input.instruction
   });
 
-  const parsed = parseToolOutput(rawText);
+  const parsed = normalizeToolOutput(parseToolOutput(rawText), input.tool);
   const filteredSections =
     input.tool.id === "text-structure" && input.values.includeTips === false
       ? parsed.sections?.filter((section) => section.label.toLowerCase() !== "leestips")

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { DEFAULT_API_KEYS, PROVIDER_BY_ID, PROVIDERS, runTool } from "./openai";
 import { TOOL_CATALOG, TOOL_BY_ID } from "./toolCatalog";
 import type { ProviderId } from "./openai";
-import type { RunResult, ToolDefinition, ToolField } from "./types";
+import type { QuizQuestion, RunGroup, RunResult, ToolDefinition, ToolField } from "./types";
 
 const API_KEY_STORAGE_KEY = "begraip-api-keys";
 const MODEL_STORAGE_KEY = "begraip-models";
@@ -19,12 +19,17 @@ Bij het oude gemaal bleef Amir staan. Hij zag een verweerd bord met onbekende wo
 Amir keek nog eens naar de rivier. Opeens begreep hij dat het water niet alleen mooi was, maar ook machtig. 
 Wat vanzelfsprekend leek, bleek het resultaat van veel kennis, werk en keuzes van mensen uit het verleden.`;
 
-type TopTab = "texts" | "llms" | "runs";
+type TopTab = "input" | "llms" | "runs";
+type SourceToken = {
+  key: string;
+  text: string;
+  wordId?: number;
+};
 
 const TOP_TABS: Array<{ id: TopTab; label: string }> = [
-  { id: "texts", label: "Texts" },
-  { id: "llms", label: "LLM settings" },
-  { id: "runs", label: "Recent runs" }
+  { id: "input", label: "Input" },
+  { id: "llms", label: "LLM's" },
+  { id: "runs", label: "Resultaten" }
 ];
 
 const formatSetting = (field: ToolField, value: string | number | boolean) => {
@@ -47,7 +52,6 @@ const formatClockTime = (timestamp: number) =>
   });
 
 const formatDuration = (durationMs: number) => `${(durationMs / 1000).toFixed(1)} s`;
-
 const customValueId = (fieldId: string) => `${fieldId}__custom`;
 
 const resolveToolValues = (
@@ -74,8 +78,53 @@ const getSelection = (text: string, start: number, end: number) => {
   return text.slice(Math.min(start, end), Math.max(start, end)).trim();
 };
 
+const tokenizeText = (text: string) => {
+  const tokens: SourceToken[] = [];
+  let wordId = 1;
+  for (const match of text.matchAll(/(\p{L}[\p{L}\p{N}'’.-]*|\s+|[^\s\p{L}\p{N}])/gu)) {
+    const chunk = match[0];
+    const isWord = /^\p{L}/u.test(chunk);
+    tokens.push({
+      key: `${tokens.length}-${chunk}`,
+      text: chunk,
+      wordId: isWord ? wordId++ : undefined
+    });
+  }
+  const tokenMap = tokens
+    .filter((token) => token.wordId !== undefined)
+    .map((token) => `- ${token.wordId}: ${token.text}`)
+    .join("\n");
+  return { tokens, tokenMap, wordCount: wordId - 1 };
+};
+
+const getRunById = (groups: RunGroup[], runId: string | null) => {
+  if (!runId) {
+    return null;
+  }
+  for (const group of groups) {
+    const match = group.runs.find((run) => run.id === runId);
+    if (match) {
+      return match;
+    }
+  }
+  return null;
+};
+
+const getRunTone = (run: RunResult) => run.status;
+const getSafeQuizQuestions = (questions: QuizQuestion[] | undefined) =>
+  Array.isArray(questions)
+    ? questions.filter(
+        (question) =>
+          question &&
+          typeof question.prompt === "string" &&
+          Array.isArray(question.choices) &&
+          question.choices.every((choice) => typeof choice === "string") &&
+          typeof question.correctIndex === "number"
+      )
+    : [];
+
 export const App = () => {
-  const [activeTab, setActiveTab] = useState<TopTab>("texts");
+  const [activeTab, setActiveTab] = useState<TopTab>("input");
   const [apiKeysByProvider, setApiKeysByProvider] = useState<Record<string, string>>(() => ({
     ...DEFAULT_API_KEYS
   }));
@@ -91,13 +140,11 @@ export const App = () => {
   );
   const [customInstructionsByTool, setCustomInstructionsByTool] = useState<Record<string, string>>({});
   const [promptOverridesByTool, setPromptOverridesByTool] = useState<Record<string, string>>({});
-  const [results, setResults] = useState<RunResult[]>([]);
+  const [runGroups, setRunGroups] = useState<RunGroup[]>([]);
   const [activeResultId, setActiveResultId] = useState<string | null>(null);
   const [answersByResult, setAnswersByResult] = useState<Record<string, Record<number, number>>>({});
-  const [loading, setLoading] = useState(false);
-  const [loadingStartedAt, setLoadingStartedAt] = useState<number | null>(null);
-  const [loadingElapsedMs, setLoadingElapsedMs] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState(Date.now());
 
   useEffect(() => {
     const savedKeys = window.localStorage.getItem(API_KEY_STORAGE_KEY);
@@ -139,25 +186,21 @@ export const App = () => {
   }, [enabledProviderIds]);
 
   useEffect(() => {
-    if (!loadingStartedAt) {
-      setLoadingElapsedMs(0);
-      return;
-    }
-
-    setLoadingElapsedMs(Date.now() - loadingStartedAt);
-    const intervalId = window.setInterval(() => {
-      setLoadingElapsedMs(Date.now() - loadingStartedAt);
-    }, 100);
-
-    return () => window.clearInterval(intervalId);
-  }, [loadingStartedAt]);
-
-  useEffect(() => {
     setSelectedRange((current) => ({
       start: Math.min(current.start, text.length),
       end: Math.min(current.end, text.length)
     }));
   }, [text]);
+
+  const pendingRuns = runGroups.flatMap((group) => group.runs).filter((run) => run.status === "pending");
+
+  useEffect(() => {
+    if (!pendingRuns.length) {
+      return;
+    }
+    const intervalId = window.setInterval(() => setNowMs(Date.now()), 100);
+    return () => window.clearInterval(intervalId);
+  }, [pendingRuns.length]);
 
   const selectedTool = TOOL_BY_ID[selectedToolId] as ToolDefinition;
   const rawSelectedValues = valuesByTool[selectedToolId];
@@ -167,31 +210,56 @@ export const App = () => {
   );
   const customInstructions = customInstructionsByTool[selectedToolId] ?? "";
   const selectedText = getSelection(text, selectedRange.start, selectedRange.end);
+  const { tokens: sourceTokens, tokenMap } = useMemo(() => tokenizeText(text), [text]);
   const generatedPrompt = selectedTool.buildInstruction({
     text,
     selectedText,
     values: selectedValues,
-    customInstructions
+    customInstructions,
+    tokenMap
   });
-  const activePrompt = promptOverridesByTool[selectedToolId] ?? generatedPrompt;
-  const activeResult = results.find((result) => result.id === activeResultId) ?? results[0] ?? null;
+  const promptOverride = promptOverridesByTool[selectedToolId];
+  const activePrompt = promptOverride ?? generatedPrompt;
+  const activeResult =
+    getRunById(runGroups, activeResultId) ??
+    runGroups.flatMap((group) => group.runs).find((run) => run.status === "success") ??
+    null;
+  const activeOutput = activeResult?.output;
 
-  const runLabel =
-    enabledProviderIds.length > 1
-      ? `Vergelijk ${enabledProviderIds.length} modellen`
-      : "Tool uitvoeren";
+  const highlightedWordMap = useMemo(() => {
+    const entries = new Map<number, { color: string; label: string }>();
+    activeOutput?.highlights?.forEach((group) => {
+      group.tokenIds.forEach((tokenId) => {
+        if (!entries.has(tokenId)) {
+          entries.set(tokenId, { color: group.color, label: group.label });
+        }
+      });
+    });
+    return entries;
+  }, [activeOutput]);
+
+  const providersWithoutImages =
+    selectedTool.outputKind === "images"
+      ? PROVIDERS.filter(
+          (provider) => enabledProviderIds.includes(provider.id) && !provider.supportsImages
+        )
+      : [];
 
   const quizScore = (() => {
-    if (!activeResult?.output.quiz) {
+    if (!activeOutput?.quiz || !activeResult) {
+      return null;
+    }
+    const safeQuestions = getSafeQuizQuestions(activeOutput.quiz.questions);
+    if (!safeQuestions.length) {
       return null;
     }
     const answers = answersByResult[activeResult.id] ?? {};
-    const correct = activeResult.output.quiz.questions.reduce((score, question, index) => {
+    const correct = safeQuestions.reduce((score, question, index) => {
       return score + (answers[index] === question.correctIndex ? 1 : 0);
     }, 0);
     return {
       correct,
-      total: activeResult.output.quiz.questions.length,
+      total: safeQuestions.length,
       answered: Object.keys(answers).length
     };
   })();
@@ -254,71 +322,104 @@ export const App = () => {
       return;
     }
 
-    setLoading(true);
-    setLoadingStartedAt(Date.now());
-    setError(null);
-
-    const settledRuns = await Promise.allSettled(
-      enabledProviderIds.map(async (providerId) => {
+    const createdAt = Date.now();
+    const groupId = createRunId();
+    const pendingGroup: RunGroup = {
+      id: groupId,
+      toolId: selectedTool.id,
+      toolName: selectedTool.name,
+      createdAt,
+      prompt: activePrompt,
+      selectedText: selectedText || undefined,
+      settings: selectedValues,
+      runs: enabledProviderIds.map((providerId) => {
         const provider = PROVIDER_BY_ID[providerId];
-        const apiKey = apiKeysByProvider[providerId] ?? "";
-        const model = modelsByProvider[providerId] ?? provider.defaultModel;
-        const startedAt = performance.now();
-        const output = await runTool({
-          providerId,
-          apiKey,
-          model,
-          tool: selectedTool,
-          instruction: activePrompt,
-          values: selectedValues
-        });
-
-        const run: RunResult = {
+        return {
           id: createRunId(),
+          groupId,
           toolId: selectedTool.id,
           toolName: selectedTool.name,
-          createdAt: Date.now(),
+          createdAt,
           providerId,
           providerLabel: provider.label,
-          model,
-          durationMs: performance.now() - startedAt,
+          model: modelsByProvider[providerId] ?? provider.defaultModel,
+          status: "pending",
           prompt: activePrompt,
           selectedText: selectedText || undefined,
-          settings: selectedValues,
-          output
-        };
-
-        return run;
+          settings: selectedValues
+        } satisfies RunResult;
       })
-    );
+    };
 
-    const successfulRuns: RunResult[] = [];
-    const failedRuns: string[] = [];
+    setRunGroups((current) => [pendingGroup, ...current]);
+    setActiveTab("runs");
+    setError(null);
 
-    settledRuns.forEach((result, index) => {
-      if (result.status === "fulfilled") {
-        successfulRuns.push(result.value);
-        return;
-      }
-      failedRuns.push(`${PROVIDER_BY_ID[enabledProviderIds[index]].label}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
-    });
+    for (const pendingRun of pendingGroup.runs) {
+      void (async () => {
+        const startedAt = performance.now();
+        try {
+          const output = await runTool({
+            providerId: pendingRun.providerId as ProviderId,
+            apiKey: apiKeysByProvider[pendingRun.providerId] ?? "",
+            model: pendingRun.model,
+            tool: selectedTool,
+            instruction: activePrompt,
+            values: selectedValues
+          });
 
-    if (successfulRuns.length) {
-      setResults((current) => [...successfulRuns, ...current]);
-      setActiveResultId(successfulRuns[0].id);
-      setAnswersByResult((current) => ({
-        ...current,
-        ...Object.fromEntries(successfulRuns.map((run) => [run.id, {}]))
-      }));
-      setActiveTab("runs");
+          let shouldSelect = false;
+          setRunGroups((current) =>
+            current.map((group) => {
+              if (group.id !== groupId) {
+                return group;
+              }
+              const hadSuccess = group.runs.some((run) => run.status === "success");
+              const nextRuns = group.runs.map((run) =>
+                run.id === pendingRun.id
+                  ? {
+                      ...run,
+                      status: "success" as const,
+                      durationMs: performance.now() - startedAt,
+                      output
+                    }
+                  : run
+              );
+              if (!hadSuccess) {
+                shouldSelect = true;
+              }
+              return { ...group, runs: nextRuns };
+            })
+          );
+
+          setAnswersByResult((current) => ({ ...current, [pendingRun.id]: {} }));
+          if (shouldSelect) {
+            setActiveResultId(pendingRun.id);
+          }
+        } catch (runError) {
+          const message = runError instanceof Error ? runError.message : String(runError);
+          setRunGroups((current) =>
+            current.map((group) =>
+              group.id === groupId
+                ? {
+                    ...group,
+                    runs: group.runs.map((run) =>
+                      run.id === pendingRun.id
+                        ? {
+                            ...run,
+                            status: "error" as const,
+                            durationMs: performance.now() - startedAt,
+                            error: message
+                          }
+                        : run
+                    )
+                  }
+                : group
+            )
+          );
+        }
+      })();
     }
-
-    if (failedRuns.length) {
-      setError(failedRuns.join(" "));
-    }
-
-    setLoading(false);
-    setLoadingStartedAt(null);
   };
 
   return (
@@ -348,50 +449,258 @@ export const App = () => {
             ))}
           </div>
 
-          {activeTab === "texts" ? (
-            <div className="card controls-card">
-              <div className="section-head">
-                <span>Tekst</span>
-                <strong>Leespassage en selectie</strong>
+          {activeTab === "input" ? (
+            <>
+              <div className="card controls-card">
+                <div className="section-head">
+                  <span>Tekst</span>
+                  <strong>Leespassage en selectie</strong>
+                </div>
+                <label className="field-stack">
+                  <span>Tekst</span>
+                  <textarea
+                    className="text-area"
+                    value={text}
+                    onChange={(event) => setText(event.target.value)}
+                    onSelect={updateSelectionFromTextArea}
+                    onKeyUp={updateSelectionFromTextArea}
+                    onMouseUp={updateSelectionFromTextArea}
+                    spellCheck={false}
+                  />
+                </label>
+                <div className="stats-row compact">
+                  <div>
+                    <strong>{text.trim() ? text.trim().split(/\s+/).length : 0}</strong>
+                    <span>woorden</span>
+                  </div>
+                  <div>
+                    <strong>{selectedText ? selectedText.split(/\s+/).length : 0}</strong>
+                    <span>geselecteerd</span>
+                  </div>
+                  <div>
+                    <strong>{runGroups.length}</strong>
+                    <span>vergelijkingen</span>
+                  </div>
+                </div>
+                <div className="selection-panel">
+                  <div className="section-head compact">
+                    <span>Selectie</span>
+                    <strong>{selectedText ? "Actieve focuspassage" : "Geen selectie"}</strong>
+                  </div>
+                  <p>
+                    {selectedText
+                      ? selectedText
+                      : "Selecteer tekst in het veld hierboven. De volledige tekst blijft meegaan naar het model; de selectie wordt apart meegegeven als focus."}
+                  </p>
+                </div>
+
+                {activeOutput?.highlights?.length ? (
+                  <div className="source-preview">
+                    <div className="section-head compact">
+                      <span>Brontekst met markeringen</span>
+                      <strong>{activeResult?.providerLabel}</strong>
+                    </div>
+                    <div className="highlight-legend">
+                      {activeOutput.highlights.map((group) => (
+                        <span key={group.label} className={`legend-pill ${group.color}`}>
+                          {group.label}
+                        </span>
+                      ))}
+                    </div>
+                    <div className="source-preview-text">
+                      {sourceTokens.map((token) => {
+                        const highlight = token.wordId ? highlightedWordMap.get(token.wordId) : undefined;
+                        return (
+                          <span
+                            key={token.key}
+                            className={highlight ? `token-highlight ${highlight.color}` : undefined}
+                            title={highlight?.label}
+                          >
+                            {token.text}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : null}
               </div>
-              <label className="field-stack">
-                <span>Tekst</span>
-                <textarea
-                  className="text-area"
-                  value={text}
-                  onChange={(event) => setText(event.target.value)}
-                  onSelect={updateSelectionFromTextArea}
-                  onKeyUp={updateSelectionFromTextArea}
-                  onMouseUp={updateSelectionFromTextArea}
-                  spellCheck={false}
-                />
-              </label>
-              <div className="stats-row compact">
-                <div>
-                  <strong>{text.trim() ? text.trim().split(/\s+/).length : 0}</strong>
-                  <span>woorden</span>
+
+              <div className="card config-card">
+                <div className="config-header">
+                  <div>
+                    <p className="eyebrow small">Actieve tool</p>
+                    <h2>{selectedTool.name}</h2>
+                    <p>{selectedTool.description}</p>
+                    {providersWithoutImages.length ? (
+                      <div className="provider-note">
+                        {providersWithoutImages.map((provider) => provider.label).join(", ")} geeft hier
+                        alleen beeldprompts terug. Alleen OpenAI rendert in deze playground ook direct de
+                        afbeeldingen zelf.
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="run-panel">
+                    <button type="button" className="run-button" onClick={runSelectedTool}>
+                      {enabledProviderIds.length > 1
+                        ? `Vergelijk ${enabledProviderIds.length} modellen`
+                        : "Tool uitvoeren"}
+                    </button>
+                    <div className={`progress-chip ${pendingRuns.length ? "active" : ""}`}>
+                      <span>{pendingRuns.length ? "Vergelijking loopt" : "Klaar voor run"}</span>
+                      <strong>
+                        {pendingRuns.length
+                          ? `${pendingRuns.length} actief`
+                          : `${enabledProviderIds.length} model${enabledProviderIds.length === 1 ? "" : "len"}`}
+                      </strong>
+                    </div>
+                  </div>
                 </div>
-                <div>
-                  <strong>{selectedText ? selectedText.split(/\s+/).length : 0}</strong>
-                  <span>geselecteerd</span>
+
+                <div className="tool-select-row">
+                  <label className="field-stack">
+                    <span>Tool</span>
+                    <select
+                      className="text-input"
+                      value={selectedToolId}
+                      onChange={(event) => setSelectedToolId(event.target.value)}
+                    >
+                      {Object.entries(
+                        TOOL_CATALOG.reduce<Record<string, ToolDefinition[]>>((accumulator, tool) => {
+                          accumulator[tool.category] ??= [];
+                          accumulator[tool.category].push(tool);
+                          return accumulator;
+                        }, {})
+                      ).map(([category, tools]) => (
+                        <optgroup label={category} key={category}>
+                          {tools.map((tool) => (
+                            <option value={tool.id} key={tool.id}>
+                              {tool.name}
+                            </option>
+                          ))}
+                        </optgroup>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="provider-note">
+                    {enabledProviderIds.length > 1
+                      ? "Deze run wordt parallel uitgevoerd voor alle geselecteerde modellen, zodat je outputs direct kunt vergelijken."
+                      : "Selecteer extra modellen in LLM's om parallel te vergelijken."}
+                  </div>
                 </div>
-                <div>
-                  <strong>{results.length}</strong>
-                  <span>runs</span>
+
+                <div className="settings-grid">
+                  {selectedTool.fields.map((field) => (
+                    <label className="field-stack field-panel setting-field" key={field.id}>
+                      <span>{field.label}</span>
+                      <div className="setting-control">
+                        {field.type === "number" ? (
+                          <input
+                            className="text-input"
+                            type="number"
+                            min={field.min}
+                            max={field.max}
+                            step={field.step ?? 1}
+                            value={Number(rawSelectedValues[field.id])}
+                            onChange={(event) => updateValue(field, Number(event.target.value))}
+                          />
+                        ) : null}
+                        {field.type === "select" ? (
+                          <>
+                            <select
+                              className="text-input"
+                              value={String(rawSelectedValues[field.id])}
+                              onChange={(event) => updateValue(field, event.target.value)}
+                            >
+                              {field.options?.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                            <input
+                              className="text-input custom-option-input"
+                              type="text"
+                              placeholder="Anders, namelijk..."
+                              value={String(rawSelectedValues[customValueId(field.id)] ?? "")}
+                              onChange={(event) => updateCustomValue(field.id, event.target.value)}
+                            />
+                          </>
+                        ) : null}
+                        {field.type === "toggle" ? (
+                          <button
+                            type="button"
+                            className={`toggle ${rawSelectedValues[field.id] ? "on" : ""}`}
+                            onClick={() => updateValue(field, !rawSelectedValues[field.id])}
+                          >
+                            <span className="toggle-knob" />
+                            <span>{rawSelectedValues[field.id] ? "Aan" : "Uit"}</span>
+                          </button>
+                        ) : null}
+                        {field.type === "textarea" ? (
+                          <textarea
+                            className="text-area setting-textarea"
+                            value={String(rawSelectedValues[field.id] ?? "")}
+                            onChange={(event) => updateValue(field, event.target.value)}
+                          />
+                        ) : null}
+                      </div>
+                      <small className="setting-help">{field.description ?? "\u00a0"}</small>
+                    </label>
+                  ))}
                 </div>
+
+                <label className="field-stack prompt-field">
+                  <span>Extra instructies voor deze tool</span>
+                  <textarea
+                    className="text-area prompt-textarea"
+                    placeholder="Voeg optionele didactische of inhoudelijke instructies toe."
+                    value={customInstructions}
+                    onChange={(event) =>
+                      setCustomInstructionsByTool((current) => ({
+                        ...current,
+                        [selectedToolId]: event.target.value
+                      }))
+                    }
+                  />
+                </label>
+
+                <details className="prompt-details">
+                  <summary>Prompt onder de motorkap</summary>
+                  <label className="field-stack prompt-field">
+                    <span>Deze prompt wordt naar het model gestuurd</span>
+                    <textarea
+                      className="text-area prompt-textarea prompt-preview"
+                      value={activePrompt}
+                      onChange={(event) =>
+                        setPromptOverridesByTool((current) => ({
+                          ...current,
+                          [selectedToolId]: event.target.value
+                        }))
+                      }
+                    />
+                  </label>
+                  {promptOverride ? (
+                    <div className="prompt-actions">
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={() =>
+                          setPromptOverridesByTool((current) => {
+                            const next = { ...current };
+                            delete next[selectedToolId];
+                            return next;
+                          })
+                        }
+                      >
+                        Reset naar gegenereerde prompt
+                      </button>
+                    </div>
+                  ) : null}
+                </details>
+
+                {error ? <div className="error-banner">{error}</div> : null}
               </div>
-              <div className="selection-panel">
-                <div className="section-head compact">
-                  <span>Selectie</span>
-                  <strong>{selectedText ? "Actieve focuspassage" : "Geen selectie"}</strong>
-                </div>
-                <p>
-                  {selectedText
-                    ? selectedText
-                    : "Selecteer tekst in het veld hierboven. De volledige tekst blijft meegaan naar het model; de selectie wordt apart meegegeven als focus."}
-                </p>
-              </div>
-            </div>
+            </>
           ) : null}
 
           {activeTab === "llms" ? (
@@ -462,195 +771,67 @@ export const App = () => {
           {activeTab === "runs" ? (
             <div className="card controls-card">
               <div className="section-head">
-                <span>Historie</span>
-                <strong>Recente runs</strong>
+                <span>Vergelijkingen</span>
+                <strong>Resultaten per prompt</strong>
               </div>
-              <div className="history-list">
-                {results.length ? (
-                  results.map((result) => (
-                    <button
-                      type="button"
-                      key={result.id}
-                      className={`history-item ${result.id === activeResultId ? "active" : ""}`}
-                      onClick={() => setActiveResultId(result.id)}
-                    >
-                      <strong>{result.toolName}</strong>
-                      <p>
-                        {result.providerLabel} · {result.model}
-                      </p>
-                      <span>
-                        {formatClockTime(result.createdAt)} · {formatDuration(result.durationMs)}
-                      </span>
-                    </button>
-                  ))
+              <div className="run-group-list">
+                {runGroups.length ? (
+                  runGroups.map((group) => {
+                    const pendingCount = group.runs.filter((run) => run.status === "pending").length;
+                    const successCount = group.runs.filter((run) => run.status === "success").length;
+                    const errorCount = group.runs.filter((run) => run.status === "error").length;
+                    return (
+                      <section className={`run-group ${pendingCount ? "pending" : ""}`} key={group.id}>
+                        <div className="run-group-head">
+                          <div>
+                            <strong>{group.toolName}</strong>
+                            <p>{formatClockTime(group.createdAt)}</p>
+                          </div>
+                          <div className="run-group-meta">
+                            <span>{pendingCount ? formatDuration(nowMs - group.createdAt) : "Afgerond"}</span>
+                            <span>
+                              {successCount} klaar · {errorCount} fout · {pendingCount} bezig
+                            </span>
+                          </div>
+                        </div>
+                        <div className="group-pill-row">
+                          {group.selectedText ? <span className="pill">Selectie actief</span> : null}
+                          {TOOL_BY_ID[group.toolId].fields.map((field) => (
+                            <span key={field.id} className="pill">
+                              {field.label}: {formatSetting(field, group.settings[field.id])}
+                            </span>
+                          ))}
+                        </div>
+                        <div className="group-run-grid">
+                          {group.runs.map((run) => (
+                            <button
+                              type="button"
+                              key={run.id}
+                              className={`run-status-card ${getRunTone(run)} ${run.id === activeResultId ? "active" : ""}`}
+                              onClick={() => run.status === "success" && setActiveResultId(run.id)}
+                            >
+                              <strong>
+                                {run.providerLabel} · {run.model}
+                              </strong>
+                              <p>
+                                {run.status === "pending"
+                                  ? `Bezig... ${formatDuration(nowMs - run.createdAt)}`
+                                  : run.status === "success"
+                                    ? `Klaar in ${formatDuration(run.durationMs ?? 0)}`
+                                    : run.error}
+                              </p>
+                            </button>
+                          ))}
+                        </div>
+                      </section>
+                    );
+                  })
                 ) : (
-                  <div className="empty-history">Nog geen runs opgeslagen.</div>
+                  <div className="empty-history">Nog geen vergelijkingen gestart.</div>
                 )}
               </div>
             </div>
           ) : null}
-
-          <div className="card config-card">
-            <div className="config-header">
-              <div>
-                <p className="eyebrow small">Actieve tool</p>
-                <h2>{selectedTool.name}</h2>
-                <p>{selectedTool.description}</p>
-              </div>
-              <div className="run-panel">
-                <button type="button" className="run-button" onClick={runSelectedTool} disabled={loading}>
-                  {loading ? "Bezig..." : runLabel}
-                </button>
-                <div className={`progress-chip ${loading ? "active" : ""}`}>
-                  <span>{loading ? "Bezig met genereren" : "Klaar voor run"}</span>
-                  <strong>{loading ? formatDuration(loadingElapsedMs) : `${enabledProviderIds.length} model${enabledProviderIds.length === 1 ? "" : "len"}`}</strong>
-                </div>
-              </div>
-            </div>
-
-            <div className="tool-select-row">
-              <label className="field-stack">
-                <span>Tool</span>
-                <select
-                  className="text-input"
-                  value={selectedToolId}
-                  onChange={(event) => setSelectedToolId(event.target.value)}
-                >
-                  {Object.entries(
-                    TOOL_CATALOG.reduce<Record<string, ToolDefinition[]>>((accumulator, tool) => {
-                      accumulator[tool.category] ??= [];
-                      accumulator[tool.category].push(tool);
-                      return accumulator;
-                    }, {})
-                  ).map(([category, tools]) => (
-                    <optgroup label={category} key={category}>
-                      {tools.map((tool) => (
-                        <option value={tool.id} key={tool.id}>
-                          {tool.name}
-                        </option>
-                      ))}
-                    </optgroup>
-                  ))}
-                </select>
-              </label>
-              <div className="provider-note">
-                {enabledProviderIds.length > 1
-                  ? "Deze run wordt parallel uitgevoerd voor alle geselecteerde modellen, zodat je outputs direct kunt vergelijken."
-                  : "Selecteer extra modellen in LLM settings om parallel te vergelijken."}
-              </div>
-            </div>
-
-            <div className="settings-grid">
-              {selectedTool.fields.map((field) => (
-                <label className="field-stack field-panel setting-field" key={field.id}>
-                  <span>{field.label}</span>
-                  <div className="setting-control">
-                    {field.type === "number" ? (
-                      <input
-                        className="text-input"
-                        type="number"
-                        min={field.min}
-                        max={field.max}
-                        step={field.step ?? 1}
-                        value={Number(rawSelectedValues[field.id])}
-                        onChange={(event) => updateValue(field, Number(event.target.value))}
-                      />
-                    ) : null}
-                    {field.type === "select" ? (
-                      <>
-                        <select
-                          className="text-input"
-                          value={String(rawSelectedValues[field.id])}
-                          onChange={(event) => updateValue(field, event.target.value)}
-                        >
-                          {field.options?.map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
-                        <input
-                          className="text-input custom-option-input"
-                          type="text"
-                          placeholder="Anders, namelijk..."
-                          value={String(rawSelectedValues[customValueId(field.id)] ?? "")}
-                          onChange={(event) => updateCustomValue(field.id, event.target.value)}
-                        />
-                      </>
-                    ) : null}
-                    {field.type === "toggle" ? (
-                      <button
-                        type="button"
-                        className={`toggle ${rawSelectedValues[field.id] ? "on" : ""}`}
-                        onClick={() => updateValue(field, !rawSelectedValues[field.id])}
-                      >
-                        <span className="toggle-knob" />
-                        <span>{rawSelectedValues[field.id] ? "Aan" : "Uit"}</span>
-                      </button>
-                    ) : null}
-                    {field.type === "textarea" ? (
-                      <textarea
-                        className="text-area setting-textarea"
-                        value={String(rawSelectedValues[field.id] ?? "")}
-                        onChange={(event) => updateValue(field, event.target.value)}
-                      />
-                    ) : null}
-                  </div>
-                  <small className="setting-help">{field.description ?? "\u00a0"}</small>
-                </label>
-              ))}
-            </div>
-
-            <label className="field-stack prompt-field">
-              <span>Extra instructies voor deze tool</span>
-              <textarea
-                className="text-area prompt-textarea"
-                placeholder="Voeg optionele didactische of inhoudelijke instructies toe."
-                value={customInstructions}
-                onChange={(event) =>
-                  setCustomInstructionsByTool((current) => ({
-                    ...current,
-                    [selectedToolId]: event.target.value
-                  }))
-                }
-              />
-            </label>
-
-            <details className="prompt-details" open>
-              <summary>Prompt onder de motorkap</summary>
-              <label className="field-stack prompt-field">
-                <span>Deze prompt wordt naar het model gestuurd</span>
-                <textarea
-                  className="text-area prompt-textarea prompt-preview"
-                  value={activePrompt}
-                  onChange={(event) =>
-                    setPromptOverridesByTool((current) => ({
-                      ...current,
-                      [selectedToolId]: event.target.value
-                    }))
-                  }
-                />
-              </label>
-              <div className="prompt-actions">
-                <button
-                  type="button"
-                  className="secondary-button"
-                  onClick={() =>
-                    setPromptOverridesByTool((current) => {
-                      const next = { ...current };
-                      delete next[selectedToolId];
-                      return next;
-                    })
-                  }
-                >
-                  Reset naar gegenereerde prompt
-                </button>
-                <span>{promptOverridesByTool[selectedToolId] ? "Aangepaste prompt actief" : "Automatisch gegenereerde prompt actief"}</span>
-              </div>
-            </details>
-
-            {error ? <div className="error-banner">{error}</div> : null}
-          </div>
         </section>
 
         <aside className="results-column">
@@ -660,30 +841,25 @@ export const App = () => {
               <strong>Actieve run</strong>
             </div>
 
-            {activeResult ? (
+            {activeResult && activeOutput ? (
               <>
                 <div className="result-intro">
                   <div>
                     <p className="eyebrow small">
                       {activeResult.toolName} · {activeResult.providerLabel}
                     </p>
-                    <h2>{activeResult.output.title}</h2>
-                    <p>{activeResult.output.summary}</p>
+                    <h2>{activeOutput.title}</h2>
+                    <p>{activeOutput.summary}</p>
                   </div>
                   <div className="result-timing">
                     <time>{formatClockTime(activeResult.createdAt)}</time>
-                    <strong>{formatDuration(activeResult.durationMs)}</strong>
+                    <strong>{formatDuration(activeResult.durationMs ?? 0)}</strong>
                   </div>
                 </div>
 
                 <div className="pill-row">
                   <span className="pill">Model: {activeResult.model}</span>
                   {activeResult.selectedText ? <span className="pill">Selectie actief</span> : null}
-                  {TOOL_BY_ID[activeResult.toolId].fields.map((field) => (
-                    <span key={field.id} className="pill">
-                      {field.label}: {formatSetting(field, activeResult.settings[field.id])}
-                    </span>
-                  ))}
                 </div>
 
                 {activeResult.selectedText ? (
@@ -693,29 +869,59 @@ export const App = () => {
                   </section>
                 ) : null}
 
-                {activeResult.output.sections?.map((section) => (
+                {activeOutput.highlights?.length ? (
+                  <section className="content-block source-preview">
+                    <div className="section-head compact">
+                      <span>Brontekst met markeringen</span>
+                      <strong>{activeResult.providerLabel}</strong>
+                    </div>
+                    <div className="highlight-legend">
+                      {activeOutput.highlights.map((group) => (
+                        <span key={group.label} className={`legend-pill ${group.color}`}>
+                          {group.label}
+                        </span>
+                      ))}
+                    </div>
+                    <div className="source-preview-text">
+                      {sourceTokens.map((token) => {
+                        const highlight = token.wordId ? highlightedWordMap.get(token.wordId) : undefined;
+                        return (
+                          <span
+                            key={token.key}
+                            className={highlight ? `token-highlight ${highlight.color}` : undefined}
+                            title={highlight?.label}
+                          >
+                            {token.text}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </section>
+                ) : null}
+
+                {activeOutput.sections?.map((section) => (
                   <section className="content-block" key={section.label}>
                     <h3>{section.label}</h3>
                     <p>{section.body}</p>
                   </section>
                 ))}
 
-                {activeResult.output.bullets?.length ? (
+                {activeOutput.bullets?.length ? (
                   <section className="content-block">
                     <h3>Kernpunten</h3>
                     <ul className="bullet-list">
-                      {activeResult.output.bullets.map((bullet) => (
+                      {activeOutput.bullets.map((bullet) => (
                         <li key={bullet}>{bullet}</li>
                       ))}
                     </ul>
                   </section>
                 ) : null}
 
-                {activeResult.output.glossary?.length ? (
+                {activeOutput.glossary?.length ? (
                   <section className="content-block">
                     <h3>Woordenlijst</h3>
                     <div className="glossary-grid">
-                      {activeResult.output.glossary.map((item) => (
+                      {activeOutput.glossary.map((item) => (
                         <article className="glossary-card" key={item.term}>
                           <div className="glossary-head">
                             <strong>{item.term}</strong>
@@ -729,11 +935,11 @@ export const App = () => {
                   </section>
                 ) : null}
 
-                {activeResult.output.images?.length ? (
+                {activeOutput.images?.length ? (
                   <section className="content-block">
                     <h3>Beelden</h3>
                     <div className="image-grid">
-                      {activeResult.output.images.map((image) => (
+                      {activeOutput.images.map((image) => (
                         <article className="image-card" key={image.title}>
                           <div
                             className={`image-frame ${image.aspectRatio === "1024x1536" ? "portrait" : image.aspectRatio === "1024x1024" ? "square" : "landscape"}`}
@@ -754,14 +960,12 @@ export const App = () => {
                   </section>
                 ) : null}
 
-                {activeResult.output.quiz ? (
+                {activeOutput.quiz && getSafeQuizQuestions(activeOutput.quiz.questions).length ? (
                   <section className="content-block">
                     <div className="quiz-head">
                       <div>
-                        <h3>{activeResult.output.quiz.title}</h3>
-                        {activeResult.output.quiz.instructions ? (
-                          <p>{activeResult.output.quiz.instructions}</p>
-                        ) : null}
+                        <h3>{activeOutput.quiz.title}</h3>
+                        {activeOutput.quiz.instructions ? <p>{activeOutput.quiz.instructions}</p> : null}
                       </div>
                       {quizScore ? (
                         <div className="score-box">
@@ -774,7 +978,7 @@ export const App = () => {
                     </div>
 
                     <div className="quiz-list">
-                      {activeResult.output.quiz.questions.map((question, questionIndex) => {
+                      {getSafeQuizQuestions(activeOutput.quiz.questions).map((question, questionIndex) => {
                         const selectedAnswer = answersByResult[activeResult.id]?.[questionIndex];
                         const isAnswered = selectedAnswer !== undefined;
 
@@ -818,11 +1022,11 @@ export const App = () => {
               </>
             ) : (
               <div className="empty-state">
-                <strong>{loading ? "Run bezig" : "Nog geen output"}</strong>
+                <strong>{pendingRuns.length ? "Vergelijking bezig" : "Nog geen output"}</strong>
                 <p>
-                  {loading
-                    ? `De geselecteerde modellen zijn bezig. Huidige looptijd: ${formatDuration(loadingElapsedMs)}.`
-                    : "Voer links een tool uit om hier het resultaat te zien."}
+                  {pendingRuns.length
+                    ? "De eerste geslaagde output verschijnt hier automatisch zodra een model antwoord geeft."
+                    : "Start links een vergelijking of kies een geslaagde run in Resultaten."}
                 </p>
               </div>
             )}

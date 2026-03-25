@@ -32,6 +32,7 @@ export type ToolDefinition = {
     selectedText?: string;
     values: Record<string, string | number | boolean>;
     customInstructions?: string;
+    tokenMap?: string;
   }) => string;
 };
 
@@ -63,6 +64,11 @@ export type ToolOutput = {
   summary: string;
   sections?: Array<{ label: string; body: string }>;
   bullets?: string[];
+  highlights?: Array<{
+    label: string;
+    color: string;
+    tokenIds: number[];
+  }>;
   quiz?: {
     title: string;
     instructions?: string;
@@ -74,15 +80,29 @@ export type ToolOutput = {
 
 export type RunResult = {
   id: string;
+  groupId: string;
   toolId: string;
   toolName: string;
   createdAt: number;
   providerId: string;
   providerLabel: string;
   model: string;
-  durationMs: number;
+  status: "pending" | "success" | "error";
+  durationMs?: number;
   prompt: string;
   selectedText?: string;
   settings: Record<string, string | number | boolean>;
-  output: ToolOutput;
+  output?: ToolOutput;
+  error?: string;
+};
+
+export type RunGroup = {
+  id: string;
+  toolId: string;
+  toolName: string;
+  createdAt: number;
+  prompt: string;
+  selectedText?: string;
+  settings: Record<string, string | number | boolean>;
+  runs: RunResult[];
 };
