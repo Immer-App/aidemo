@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { DEFAULT_API_KEYS, PROVIDER_BY_ID, PROVIDERS, runTool } from "./openai";
+import { estimateCost, PROVIDER_MODEL_PRESETS } from "./pricing";
 import { TOOL_CATALOG, TOOL_BY_ID } from "./toolCatalog";
 import type { ProviderId } from "./openai";
-import type { QuizQuestion, RunGroup, RunResult, ToolDefinition, ToolField } from "./types";
+import type { QuizQuestion, RunGroup, RunResult, ToolDefinition, ToolField, UsageLogEntry } from "./types";
 
 const API_KEY_STORAGE_KEY = "begraip-api-keys";
 const MODEL_STORAGE_KEY = "begraip-models";
 const ENABLED_PROVIDER_STORAGE_KEY = "begraip-enabled-providers";
+const SELECTION_ONLY_STORAGE_KEY = "begraip-selection-only";
+const USAGE_LOG_STORAGE_KEY = "begraip-usage-log";
 const DEMO_TEXT = `Op een winderige ochtend liep Amir met zijn oma over de dijk langs de rivier. 
 De lucht was grijs, maar op het water dreven glinsterende strepen licht. 
 Oma vertelde dat de rivier al eeuwenlang belangrijk was voor het dorp: vissers verdienden er hun brood, handelaren brachten goederen mee en kinderen leerden aan de oever zwemmen.
@@ -52,6 +55,11 @@ const formatClockTime = (timestamp: number) =>
   });
 
 const formatDuration = (durationMs: number) => `${(durationMs / 1000).toFixed(1)} s`;
+const formatTokens = (count?: number) => (typeof count === "number" ? count.toLocaleString("nl-NL") : "n.b.");
+const formatUsd = (amount?: number) =>
+  typeof amount === "number" ? `$${amount.toFixed(amount < 0.01 ? 4 : 2)}` : "n.b.";
+const formatTokenBreakdown = (usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number }) =>
+  `Input tokens ${formatTokens(usage?.inputTokens)} · Output tokens ${formatTokens(usage?.outputTokens)} · Totaal tokens ${formatTokens(usage?.totalTokens)}`;
 const customValueId = (fieldId: string) => `${fieldId}__custom`;
 
 const resolveToolValues = (
@@ -129,11 +137,17 @@ export const App = () => {
     ...DEFAULT_API_KEYS
   }));
   const [modelsByProvider, setModelsByProvider] = useState<Record<string, string>>(() =>
-    Object.fromEntries(PROVIDERS.map((provider) => [provider.id, provider.defaultModel]))
+    Object.fromEntries(
+      PROVIDERS.map((provider) => [
+        provider.id,
+        PROVIDER_MODEL_PRESETS[provider.id]?.[0]?.id ?? provider.defaultModel
+      ])
+    )
   );
   const [enabledProviderIds, setEnabledProviderIds] = useState<ProviderId[]>(["openai"]);
   const [text, setText] = useState(DEMO_TEXT);
   const [selectedRange, setSelectedRange] = useState({ start: 0, end: 0 });
+  const [selectionOnly, setSelectionOnly] = useState(false);
   const [selectedToolId, setSelectedToolId] = useState(TOOL_CATALOG[0].id);
   const [valuesByTool, setValuesByTool] = useState<Record<string, Record<string, string | number | boolean>>>(
     () => Object.fromEntries(TOOL_CATALOG.map((tool) => [tool.id, { ...tool.defaults }]))
@@ -145,6 +159,8 @@ export const App = () => {
   const [answersByResult, setAnswersByResult] = useState<Record<string, Record<number, number>>>({});
   const [error, setError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(Date.now());
+  const [usageLog, setUsageLog] = useState<UsageLogEntry[]>([]);
+  const [activeReferenceSourceTokenId, setActiveReferenceSourceTokenId] = useState<number | null>(null);
 
   useEffect(() => {
     const savedKeys = window.localStorage.getItem(API_KEY_STORAGE_KEY);
@@ -171,6 +187,16 @@ export const App = () => {
         setEnabledProviderIds(valid);
       }
     }
+
+    const savedSelectionOnly = window.localStorage.getItem(SELECTION_ONLY_STORAGE_KEY);
+    if (savedSelectionOnly) {
+      setSelectionOnly(savedSelectionOnly === "true");
+    }
+
+    const savedUsageLog = window.localStorage.getItem(USAGE_LOG_STORAGE_KEY);
+    if (savedUsageLog) {
+      setUsageLog(JSON.parse(savedUsageLog) as UsageLogEntry[]);
+    }
   }, []);
 
   useEffect(() => {
@@ -184,6 +210,14 @@ export const App = () => {
   useEffect(() => {
     window.localStorage.setItem(ENABLED_PROVIDER_STORAGE_KEY, JSON.stringify(enabledProviderIds));
   }, [enabledProviderIds]);
+
+  useEffect(() => {
+    window.localStorage.setItem(SELECTION_ONLY_STORAGE_KEY, String(selectionOnly));
+  }, [selectionOnly]);
+
+  useEffect(() => {
+    window.localStorage.setItem(USAGE_LOG_STORAGE_KEY, JSON.stringify(usageLog));
+  }, [usageLog]);
 
   useEffect(() => {
     setSelectedRange((current) => ({
@@ -216,7 +250,8 @@ export const App = () => {
     selectedText,
     values: selectedValues,
     customInstructions,
-    tokenMap
+    tokenMap: selectedTool.id === "word-highlighter" ? tokenMap : undefined,
+    selectionOnly
   });
   const promptOverride = promptOverridesByTool[selectedToolId];
   const activePrompt = promptOverride ?? generatedPrompt;
@@ -237,6 +272,30 @@ export const App = () => {
     });
     return entries;
   }, [activeOutput]);
+
+  const referenceSourceMap = useMemo(() => {
+    const entries = new Map<number, { targetTokenIds: number[]; label?: string }>();
+    activeOutput?.references?.forEach((reference) => {
+      reference.sourceTokenIds.forEach((sourceTokenId) => {
+        entries.set(sourceTokenId, {
+          targetTokenIds: reference.targetTokenIds,
+          label: reference.label
+        });
+      });
+    });
+    return entries;
+  }, [activeOutput]);
+
+  const activeReferenceTargetIds = useMemo(() => {
+    if (activeReferenceSourceTokenId === null) {
+      return new Set<number>();
+    }
+    return new Set(referenceSourceMap.get(activeReferenceSourceTokenId)?.targetTokenIds ?? []);
+  }, [activeReferenceSourceTokenId, referenceSourceMap]);
+
+  useEffect(() => {
+    setActiveReferenceSourceTokenId(null);
+  }, [activeResult?.id]);
 
   const providersWithoutImages =
     selectedTool.outputKind === "images"
@@ -263,6 +322,31 @@ export const App = () => {
       answered: Object.keys(answers).length
     };
   })();
+
+  const totalLoggedTokens = useMemo(
+    () =>
+      usageLog.reduce((sum, entry) => sum + (entry.usage?.totalTokens ?? 0), 0),
+    [usageLog]
+  );
+  const totalLoggedCostUsd = useMemo(
+    () =>
+      usageLog.reduce((sum, entry) => sum + (entry.cost?.totalCostUsd ?? 0), 0),
+    [usageLog]
+  );
+
+  const appendUsageLog = (entry: UsageLogEntry) => {
+    setUsageLog((current) => [entry, ...current].slice(0, 500));
+  };
+
+  const exportUsageLog = () => {
+    const blob = new Blob([JSON.stringify(usageLog, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `begraip-usage-log-${new Date().toISOString()}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
 
   const updateValue = (field: ToolField, nextValue: string | number | boolean) => {
     setValuesByTool((current) => ({
@@ -332,6 +416,7 @@ export const App = () => {
       prompt: activePrompt,
       selectedText: selectedText || undefined,
       settings: selectedValues,
+      autoSelectLocked: false,
       runs: enabledProviderIds.map((providerId) => {
         const provider = PROVIDER_BY_ID[providerId];
         return {
@@ -359,7 +444,7 @@ export const App = () => {
       void (async () => {
         const startedAt = performance.now();
         try {
-          const output = await runTool({
+          const result = await runTool({
             providerId: pendingRun.providerId as ProviderId,
             apiKey: apiKeysByProvider[pendingRun.providerId] ?? "",
             model: pendingRun.model,
@@ -369,35 +454,56 @@ export const App = () => {
           });
 
           let shouldSelect = false;
+          let autoSelectRunId: string | null = null;
+          const durationMs = performance.now() - startedAt;
+          const cost = estimateCost(pendingRun.providerId as ProviderId, pendingRun.model, result.usage);
           setRunGroups((current) =>
             current.map((group) => {
               if (group.id !== groupId) {
                 return group;
               }
-              const hadSuccess = group.runs.some((run) => run.status === "success");
               const nextRuns = group.runs.map((run) =>
                 run.id === pendingRun.id
                   ? {
                       ...run,
                       status: "success" as const,
-                      durationMs: performance.now() - startedAt,
-                      output
+                      durationMs,
+                      output: result.output,
+                      usage: result.usage,
+                      cost
                     }
                   : run
               );
-              if (!hadSuccess) {
+              if (!group.autoSelectLocked) {
                 shouldSelect = true;
+                autoSelectRunId = pendingRun.id;
               }
               return { ...group, runs: nextRuns };
             })
           );
 
           setAnswersByResult((current) => ({ ...current, [pendingRun.id]: {} }));
-          if (shouldSelect) {
-            setActiveResultId(pendingRun.id);
+          appendUsageLog({
+            id: pendingRun.id,
+            createdAt,
+            toolId: selectedTool.id,
+            toolName: selectedTool.name,
+            providerId: pendingRun.providerId,
+            providerLabel: pendingRun.providerLabel,
+            model: pendingRun.model,
+            status: "success",
+            durationMs,
+            selectedTextLength: selectedText.length,
+            settings: selectedValues,
+            usage: result.usage,
+            cost
+          });
+          if (shouldSelect && autoSelectRunId) {
+            setActiveResultId(autoSelectRunId);
           }
         } catch (runError) {
           const message = runError instanceof Error ? runError.message : String(runError);
+          const durationMs = performance.now() - startedAt;
           setRunGroups((current) =>
             current.map((group) =>
               group.id === groupId
@@ -408,7 +514,7 @@ export const App = () => {
                         ? {
                             ...run,
                             status: "error" as const,
-                            durationMs: performance.now() - startedAt,
+                            durationMs,
                             error: message
                           }
                         : run
@@ -417,6 +523,20 @@ export const App = () => {
                 : group
             )
           );
+          appendUsageLog({
+            id: pendingRun.id,
+            createdAt,
+            toolId: selectedTool.id,
+            toolName: selectedTool.name,
+            providerId: pendingRun.providerId,
+            providerLabel: pendingRun.providerLabel,
+            model: pendingRun.model,
+            status: "error",
+            durationMs,
+            selectedTextLength: selectedText.length,
+            settings: selectedValues,
+            error: message
+          });
         }
       })();
     }
@@ -492,37 +612,15 @@ export const App = () => {
                       ? selectedText
                       : "Selecteer tekst in het veld hierboven. De volledige tekst blijft meegaan naar het model; de selectie wordt apart meegegeven als focus."}
                   </p>
+                  <label className="selection-toggle">
+                    <input
+                      type="checkbox"
+                      checked={selectionOnly}
+                      onChange={(event) => setSelectionOnly(event.target.checked)}
+                    />
+                    <span>Alleen geselecteerde tekst naar het model sturen</span>
+                  </label>
                 </div>
-
-                {activeOutput?.highlights?.length ? (
-                  <div className="source-preview">
-                    <div className="section-head compact">
-                      <span>Brontekst met markeringen</span>
-                      <strong>{activeResult?.providerLabel}</strong>
-                    </div>
-                    <div className="highlight-legend">
-                      {activeOutput.highlights.map((group) => (
-                        <span key={group.label} className={`legend-pill ${group.color}`}>
-                          {group.label}
-                        </span>
-                      ))}
-                    </div>
-                    <div className="source-preview-text">
-                      {sourceTokens.map((token) => {
-                        const highlight = token.wordId ? highlightedWordMap.get(token.wordId) : undefined;
-                        return (
-                          <span
-                            key={token.key}
-                            className={highlight ? `token-highlight ${highlight.color}` : undefined}
-                            title={highlight?.label}
-                          >
-                            {token.text}
-                          </span>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ) : null}
               </div>
 
               <div className="card config-card">
@@ -730,6 +828,7 @@ export const App = () => {
                         <input
                           className="text-input"
                           type="text"
+                          list={`model-presets-${provider.id}`}
                           name={`llm-model-${provider.id}`}
                           autoComplete="off"
                           autoCorrect="off"
@@ -743,6 +842,39 @@ export const App = () => {
                             }))
                           }
                         />
+                        <datalist id={`model-presets-${provider.id}`}>
+                          {PROVIDER_MODEL_PRESETS[provider.id]?.map((preset) => (
+                            <option key={preset.id} value={preset.id}>
+                              {preset.label}
+                            </option>
+                          ))}
+                        </datalist>
+                        {PROVIDER_MODEL_PRESETS[provider.id]?.length ? (
+                          <div className="model-preset-row">
+                            {PROVIDER_MODEL_PRESETS[provider.id].map((preset) => (
+                              <button
+                                type="button"
+                                key={preset.id}
+                                className={`preset-pill ${modelsByProvider[provider.id] === preset.id ? "active" : ""}`}
+                                onClick={() =>
+                                  setModelsByProvider((current) => ({
+                                    ...current,
+                                    [provider.id]: preset.id
+                                  }))
+                                }
+                              >
+                                {preset.label}
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                        {(provider.id === "google" || provider.id === "anthropic") ? (
+                          <small className="setting-help">
+                            {provider.id === "google"
+                              ? "Voor betaalde Gemini-modellen heb je een actief billing account nodig. Kosten gebruiken Gemini API standaardtarieven."
+                              : "Anthropic API gebruikt betaalde modellen. Kosten gebruiken officiële Anthropic tokenprijzen voor de aangeboden modelreeksen."}
+                          </small>
+                        ) : null}
                       </label>
                       <label className="field-stack">
                         <span>API key</span>
@@ -773,6 +905,26 @@ export const App = () => {
               <div className="section-head">
                 <span>Vergelijkingen</span>
                 <strong>Resultaten per prompt</strong>
+              </div>
+              <div className="usage-toolbar">
+                <div className="usage-summary-card">
+                  <strong>{usageLog.length}</strong>
+                  <span>gelogde requests</span>
+                </div>
+                <div className="usage-summary-card">
+                  <strong>{formatTokens(totalLoggedTokens)}</strong>
+                  <span>gelogde tokens</span>
+                </div>
+                <div className="usage-summary-card">
+                  <strong>{formatUsd(totalLoggedCostUsd)}</strong>
+                  <span>geschatte kosten</span>
+                </div>
+                <button type="button" className="secondary-button" onClick={exportUsageLog}>
+                  Exporteer log
+                </button>
+                <button type="button" className="secondary-button" onClick={() => setUsageLog([])}>
+                  Wis log
+                </button>
               </div>
               <div className="run-group-list">
                 {runGroups.length ? (
@@ -807,8 +959,18 @@ export const App = () => {
                             <button
                               type="button"
                               key={run.id}
-                              className={`run-status-card ${getRunTone(run)} ${run.id === activeResultId ? "active" : ""}`}
-                              onClick={() => run.status === "success" && setActiveResultId(run.id)}
+                              className={`run-status-card ${getRunTone(run)} ${run.id === activeResult?.id ? "active" : ""}`}
+                              onClick={() => {
+                                if (run.status !== "success") {
+                                  return;
+                                }
+                                setRunGroups((current) =>
+                                  current.map((entry) =>
+                                    entry.id === group.id ? { ...entry, autoSelectLocked: true } : entry
+                                  )
+                                );
+                                setActiveResultId(run.id);
+                              }}
                             >
                               <strong>
                                 {run.providerLabel} · {run.model}
@@ -820,6 +982,11 @@ export const App = () => {
                                     ? `Klaar in ${formatDuration(run.durationMs ?? 0)}`
                                     : run.error}
                               </p>
+                              {run.status !== "pending" ? (
+                                <small className="token-meta">
+                                  {formatTokenBreakdown(run.usage)} · Kosten {formatUsd(run.cost?.totalCostUsd)}
+                                </small>
+                              ) : null}
                             </button>
                           ))}
                         </div>
@@ -859,10 +1026,16 @@ export const App = () => {
 
                 <div className="pill-row">
                   <span className="pill">Model: {activeResult.model}</span>
+                  <span className="pill">
+                    {formatTokenBreakdown(activeResult.usage)}
+                  </span>
+                  <span className="pill">
+                    Kosten: {formatUsd(activeResult.cost?.inputCostUsd)} in · {formatUsd(activeResult.cost?.outputCostUsd)} uit · {formatUsd(activeResult.cost?.totalCostUsd)} totaal
+                  </span>
                   {activeResult.selectedText ? <span className="pill">Selectie actief</span> : null}
                 </div>
 
-                {activeResult.selectedText ? (
+                {activeResult.selectedText && activeResult.toolId !== "word-highlighter" ? (
                   <section className="content-block selection-result">
                     <h3>Geselecteerde passage</h3>
                     <p>{activeResult.selectedText}</p>
@@ -885,12 +1058,38 @@ export const App = () => {
                     <div className="source-preview-text">
                       {sourceTokens.map((token) => {
                         const highlight = token.wordId ? highlightedWordMap.get(token.wordId) : undefined;
+                        const reference = token.wordId ? referenceSourceMap.get(token.wordId) : undefined;
+                        const isReferenceSource = token.wordId === activeReferenceSourceTokenId;
+                        const isReferenceTarget = token.wordId ? activeReferenceTargetIds.has(token.wordId) : false;
+                        const className = [
+                          highlight ? `token-highlight ${highlight.color}` : "",
+                          reference ? "token-reference-source" : "",
+                          isReferenceSource ? "token-reference-source-active" : "",
+                          isReferenceTarget ? "token-reference-target" : ""
+                        ]
+                          .filter(Boolean)
+                          .join(" ");
+
+                        if (reference && token.wordId) {
+                          return (
+                            <button
+                              type="button"
+                              key={token.key}
+                              className={`token-inline-button ${className}`}
+                              title={reference.label ?? highlight?.label}
+                              onClick={() =>
+                                setActiveReferenceSourceTokenId((current) =>
+                                  current === token.wordId ? null : token.wordId!
+                                )
+                              }
+                            >
+                              {token.text}
+                            </button>
+                          );
+                        }
+
                         return (
-                          <span
-                            key={token.key}
-                            className={highlight ? `token-highlight ${highlight.color}` : undefined}
-                            title={highlight?.label}
-                          >
+                          <span key={token.key} className={className || undefined} title={highlight?.label}>
                             {token.text}
                           </span>
                         );
@@ -905,6 +1104,39 @@ export const App = () => {
                     <p>{section.body}</p>
                   </section>
                 ))}
+
+                {activeOutput.timeline?.length ? (
+                  <section className="content-block">
+                    <h3>Tijdlijn</h3>
+                    <div className="timeline-grid">
+                      {activeOutput.timeline.map((item, index) => (
+                        <article className="timeline-card" key={`${item.title}-${index}`}>
+                          <div className="timeline-step">{index + 1}</div>
+                          <div className="timeline-copy">
+                            <strong>{item.title}</strong>
+                            {item.detail ? <p>{item.detail}</p> : null}
+                            {(item.cause || item.effect) ? (
+                              <div className="cause-effect-grid">
+                                {item.cause ? (
+                                  <div className="cause-effect-block">
+                                    <span>Oorzaak</span>
+                                    <p>{item.cause}</p>
+                                  </div>
+                                ) : null}
+                                {item.effect ? (
+                                  <div className="cause-effect-block">
+                                    <span>Gevolg</span>
+                                    <p>{item.effect}</p>
+                                  </div>
+                                ) : null}
+                              </div>
+                            ) : null}
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  </section>
+                ) : null}
 
                 {activeOutput.bullets?.length ? (
                   <section className="content-block">
@@ -1006,7 +1238,10 @@ export const App = () => {
                               })}
                             </div>
                             {isAnswered && question.explanation ? (
-                              <p className="explanation">{question.explanation}</p>
+                              <p className="explanation">
+                                {selectedAnswer === question.correctIndex ? "Uitleg: " : "Waarom fout: "}
+                                {question.explanation}
+                              </p>
                             ) : null}
                           </article>
                         );
@@ -1019,6 +1254,23 @@ export const App = () => {
                   <summary>Bekijk gebruikte prompt</summary>
                   <pre>{activeResult.prompt}</pre>
                 </details>
+
+                {usageLog.length ? (
+                  <section className="content-block">
+                    <h3>Recente usage-log</h3>
+                    <div className="usage-log-list">
+                      {usageLog.slice(0, 12).map((entry) => (
+                        <article className="usage-log-card" key={`${entry.id}-${entry.createdAt}`}>
+                          <strong>{entry.toolName} · {entry.providerLabel}</strong>
+                          <p>{entry.model}</p>
+                          <small className="token-meta">
+                            {formatClockTime(entry.createdAt)} · {entry.status} · {formatTokenBreakdown(entry.usage)} · Kosten {formatUsd(entry.cost?.totalCostUsd)}
+                          </small>
+                        </article>
+                      ))}
+                    </div>
+                  </section>
+                ) : null}
               </>
             ) : (
               <div className="empty-state">

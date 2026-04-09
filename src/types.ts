@@ -33,6 +33,7 @@ export type ToolDefinition = {
     values: Record<string, string | number | boolean>;
     customInstructions?: string;
     tokenMap?: string;
+    selectionOnly?: boolean;
   }) => string;
 };
 
@@ -76,6 +77,30 @@ export type ToolOutput = {
   };
   glossary?: GlossaryEntry[];
   images?: ImageAsset[];
+  timeline?: Array<{
+    title: string;
+    detail?: string;
+    cause?: string;
+    effect?: string;
+  }>;
+  references?: Array<{
+    sourceTokenIds: number[];
+    targetTokenIds: number[];
+    label?: string;
+  }>;
+};
+
+export type TokenUsage = {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+};
+
+export type CostEstimate = {
+  inputCostUsd?: number;
+  outputCostUsd?: number;
+  totalCostUsd?: number;
+  pricingLabel?: string;
 };
 
 export type RunResult = {
@@ -92,6 +117,8 @@ export type RunResult = {
   prompt: string;
   selectedText?: string;
   settings: Record<string, string | number | boolean>;
+  usage?: TokenUsage;
+  cost?: CostEstimate;
   output?: ToolOutput;
   error?: string;
 };
@@ -104,5 +131,23 @@ export type RunGroup = {
   prompt: string;
   selectedText?: string;
   settings: Record<string, string | number | boolean>;
+  autoSelectLocked: boolean;
   runs: RunResult[];
+};
+
+export type UsageLogEntry = {
+  id: string;
+  createdAt: number;
+  toolId: string;
+  toolName: string;
+  providerId: string;
+  providerLabel: string;
+  model: string;
+  status: RunResult["status"];
+  durationMs?: number;
+  selectedTextLength: number;
+  settings: Record<string, string | number | boolean>;
+  usage?: TokenUsage;
+  cost?: CostEstimate;
+  error?: string;
 };

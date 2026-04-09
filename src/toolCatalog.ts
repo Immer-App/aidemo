@@ -7,15 +7,21 @@ const withSharedContext = (
   body: string,
   selectedText?: string,
   customInstructions?: string,
-  tokenMap?: string
+  tokenMap?: string,
+  selectionOnly?: boolean
 ) => `${body}
 
-${selectedText?.trim()
-    ? `Geselecteerde passage:
+${selectionOnly && selectedText?.trim()
+    ? `Gebruik alleen de geselecteerde passage als bron.
+
+Geselecteerde passage:
+"""${selectedText.trim()}"""`
+    : selectedText?.trim()
+      ? `Geselecteerde passage:
 """${selectedText.trim()}"""
 
 Behandel de volledige tekst als hoofdcontext, maar leg in je antwoord extra nadruk op deze selectie.`
-    : "Er is geen aparte selectie opgegeven. Gebruik de volledige tekst als context."}
+      : "Er is geen aparte selectie opgegeven. Gebruik de volledige tekst als context."}
 ${tokenMap?.trim() ? `
 
 Tokenlijst voor eventuele annotaties:
@@ -62,31 +68,41 @@ export const TOOL_CATALOG: ToolDefinition[] = [
         label: "Geef antwoorduitleg",
         type: "toggle",
         description: "Laat per vraag zien waarom het antwoord klopt."
+      },
+      {
+        id: "explainWrongAnswers",
+        label: "Leg foute antwoorden uit",
+        type: "toggle",
+        description: "Laat per vraag ook kort zien waarom de afleiders niet kloppen."
       }
     ],
     defaults: {
       questionCount: 6,
       choiceCount: "4",
       difficulty: "gemiddeld",
-      explanations: true
+      explanations: true,
+      explainWrongAnswers: true
     },
-    buildInstruction: ({ text, selectedText, values, customInstructions, tokenMap }) =>
+    buildInstruction: ({ text, selectedText, values, customInstructions, selectionOnly }) =>
       withSharedContext(`Maak een multiple-choicequiz over deze tekst.
 
 Tekst:
-${text}
+${selectionOnly && selectedText?.trim() ? selectedText : text}
 
 Instellingen:
 - aantal vragen: ${asNumber(values.questionCount)}
 - aantal antwoordopties per vraag: ${asNumber(values.choiceCount)}
 - niveau: ${asText(values.difficulty)}
 - antwoorduitleg opnemen: ${asBool(values.explanations) ? "ja" : "nee"}
+- foute antwoorden toelichten: ${asBool(values.explainWrongAnswers) ? "ja" : "nee"}
 
 Vereisten:
 - focus op begrijpend lezen: hoofdgedachte, details, inferenties, woordbetekenis in context en bedoeling van de schrijver
 - zorg dat er precies het gevraagde aantal vragen komt
 - maak geloofwaardige afleiders
 - gebruik Nederlands
+- als foute antwoorden toelichten uit staat, laat dan alleen zien waarom het goede antwoord klopt
+- als foute antwoorden toelichten aan staat, noem in de explanation ook kort waarom de andere opties niet kloppen
 
 Geef alleen geldige JSON in dit formaat:
 {
@@ -104,7 +120,7 @@ Geef alleen geldige JSON in dit formaat:
       }
     ]
   }
-}`, selectedText, customInstructions, tokenMap)
+}`, selectedText, customInstructions, undefined, selectionOnly)
   },
   {
     id: "image-generator",
@@ -156,11 +172,11 @@ Geef alleen geldige JSON in dit formaat:
       style: "educatieve illustratie",
       aspect: "1536x1024"
     },
-    buildInstruction: ({ text, selectedText, values, customInstructions, tokenMap }) =>
+    buildInstruction: ({ text, selectedText, values, customInstructions, selectionOnly }) =>
       withSharedContext(`Analyseer de tekst en maak een beeldplan.
 
 Tekst:
-${text}
+${selectionOnly && selectedText?.trim() ? selectedText : text}
 
 Instellingen:
 - focus: ${asText(values.focus)}
@@ -185,7 +201,7 @@ Geef alleen geldige JSON in dit formaat:
       "alt": "string"
     }
   ]
-}`, selectedText, customInstructions, tokenMap)
+}`, selectedText, customInstructions, undefined, selectionOnly)
   },
   {
     id: "prior-knowledge",
@@ -225,11 +241,11 @@ Geef alleen geldige JSON in dit formaat:
       scope: "onderwerp",
       level: "basisschool bovenbouw"
     },
-    buildInstruction: ({ text, selectedText, values, customInstructions, tokenMap }) =>
+    buildInstruction: ({ text, selectedText, values, customInstructions, selectionOnly }) =>
       withSharedContext(`Genereer een quiz die voorkennis toetst voordat iemand de tekst leest.
 
 Tekst:
-${text}
+${selectionOnly && selectedText?.trim() ? selectedText : text}
 
 Instellingen:
 - aantal vragen: ${asNumber(values.questionCount)}
@@ -258,7 +274,7 @@ Geef alleen geldige JSON in dit formaat:
       }
     ]
   }
-}`, selectedText, customInstructions, tokenMap)
+}`, selectedText, customInstructions, undefined, selectionOnly)
   },
   {
     id: "glossary",
@@ -290,8 +306,7 @@ Geef alleen geldige JSON in dit formaat:
         type: "select",
         options: [
           { label: "Kort en simpel", value: "kort en simpel" },
-          { label: "Met nuance", value: "met nuance" },
-          { label: "Met voorbeeldzin", value: "met voorbeeldzin" }
+          { label: "Met nuance", value: "met nuance" }
         ]
       },
       {
@@ -306,11 +321,11 @@ Geef alleen geldige JSON in dit formaat:
       definitionStyle: "kort en simpel",
       includeExample: true
     },
-    buildInstruction: ({ text, selectedText, values, customInstructions, tokenMap }) =>
+    buildInstruction: ({ text, selectedText, values, customInstructions, selectionOnly }) =>
       withSharedContext(`Maak een woordenlijst bij de tekst.
 
 Tekst:
-${text}
+${selectionOnly && selectedText?.trim() ? selectedText : text}
 
 Instellingen:
 - aantal woorden: ${asNumber(values.wordCount)}
@@ -335,11 +350,11 @@ Geef alleen geldige JSON in dit formaat:
       "example": "string"
     }
   ]
-}`, selectedText, customInstructions, tokenMap)
+}`, selectedText, customInstructions, undefined, selectionOnly)
   },
   {
     id: "summary",
-    name: "Samenvatting op Niveau",
+    name: "Samenvatting",
     tagline: "Maak een samenvatting passend bij de lezer.",
     description:
       "Vat de tekst samen op een gekozen leesniveau en met een duidelijke didactische insteek.",
@@ -353,9 +368,9 @@ Geef alleen geldige JSON in dit formaat:
         label: "Lengte",
         type: "select",
         options: [
-          { label: "Ultrakort", value: "ultrakort" },
-          { label: "Klas-klaar", value: "klas-klaar" },
-          { label: "Uitgebreid", value: "uitgebreid" }
+          { label: "2 zinnen", value: "2 zinnen" },
+          { label: "1 alinea", value: "1 alinea" },
+          { label: "3 alinea's", value: "3 alinea's" }
         ]
       },
       {
@@ -380,20 +395,27 @@ Geef alleen geldige JSON in dit formaat:
       }
     ],
     defaults: {
-      length: "klas-klaar",
+      length: "1 alinea",
       readerLevel: "gemiddeld",
-      format: "stap voor stap"
+      format: "doorlopende tekst"
     },
-    buildInstruction: ({ text, selectedText, values, customInstructions, tokenMap }) =>
+    buildInstruction: ({ text, selectedText, values, customInstructions, selectionOnly }) =>
       withSharedContext(`Vat de tekst samen.
 
 Tekst:
-${text}
+${selectionOnly && selectedText?.trim() ? selectedText : text}
 
 Instellingen:
 - lengte: ${asText(values.length)}
 - leesniveau: ${asText(values.readerLevel)}
 - vorm: ${asText(values.format)}
+
+Vereisten:
+- volg de gevraagde vorm exact
+- bij "doorlopende tekst" gebruik je geen bullets, geen nummering en geen losse labels
+- bij "puntsgewijs" geef je de samenvatting alleen als bullets
+- bij "stap voor stap" geef je een korte genummerde volgorde
+- sections en bullets moeten aansluiten op de gevraagde vorm; laat velden weg die niet passen
 
 Geef alleen geldige JSON in dit formaat:
 {
@@ -404,7 +426,7 @@ Geef alleen geldige JSON in dit formaat:
     { "label": "Belangrijkste details", "body": "string" }
   ],
   "bullets": ["string"]
-}`, selectedText, customInstructions, tokenMap)
+}`, selectedText, customInstructions, undefined, selectionOnly)
   },
   {
     id: "timeline",
@@ -437,26 +459,40 @@ Geef alleen geldige JSON in dit formaat:
       granularity: "gebalanceerd",
       includeCauseEffect: true
     },
-    buildInstruction: ({ text, selectedText, values, customInstructions, tokenMap }) =>
+    buildInstruction: ({ text, selectedText, values, customInstructions, selectionOnly }) =>
       withSharedContext(`Maak een tijdlijn van de tekst.
 
 Tekst:
-${text}
+${selectionOnly && selectedText?.trim() ? selectedText : text}
 
 Instellingen:
 - detailniveau: ${asText(values.granularity)}
 - oorzaak-gevolg opnemen: ${asBool(values.includeCauseEffect) ? "ja" : "nee"}
 
+Vereisten:
+- gebruik geen markdown in strings
+- schrijf compacte, heldere zinnen
+- maak de tijdlijn concreet en chronologisch
+- als oorzaak-gevolg opnemen aan staat, vul dan per gebeurtenis waar passend cause en effect in
+
 Geef alleen geldige JSON in dit formaat:
 {
   "title": "string",
   "summary": "string",
+  "timeline": [
+    {
+      "title": "string",
+      "detail": "string",
+      "cause": "string",
+      "effect": "string"
+    }
+  ],
   "sections": [
     { "label": "Tijdlijn", "body": "string" },
     { "label": "Oorzaak en gevolg", "body": "string" }
   ],
   "bullets": ["string"]
-}`, selectedText, customInstructions, tokenMap)
+}`, selectedText, customInstructions, undefined, selectionOnly)
   },
   {
     id: "character-map",
@@ -492,11 +528,11 @@ Geef alleen geldige JSON in dit formaat:
       focus: "relaties",
       characterCount: 4
     },
-    buildInstruction: ({ text, selectedText, values, customInstructions, tokenMap }) =>
+    buildInstruction: ({ text, selectedText, values, customInstructions, selectionOnly }) =>
       withSharedContext(`Analyseer de personages in de tekst.
 
 Tekst:
-${text}
+${selectionOnly && selectedText?.trim() ? selectedText : text}
 
 Instellingen:
 - analysefocus: ${asText(values.focus)}
@@ -511,7 +547,7 @@ Geef alleen geldige JSON in dit formaat:
     { "label": "Relaties", "body": "string" }
   ],
   "bullets": ["string"]
-}`, selectedText, customInstructions, tokenMap)
+}`, selectedText, customInstructions, undefined, selectionOnly)
   },
   {
     id: "text-structure",
@@ -544,11 +580,11 @@ Geef alleen geldige JSON in dit formaat:
       structureType: "beide",
       includeTips: true
     },
-    buildInstruction: ({ text, selectedText, values, customInstructions, tokenMap }) =>
+    buildInstruction: ({ text, selectedText, values, customInstructions, selectionOnly }) =>
       withSharedContext(`Analyseer de structuur van de tekst.
 
 Tekst:
-${text}
+${selectionOnly && selectedText?.trim() ? selectedText : text}
 
 Instellingen:
 - focus: ${asText(values.structureType)}
@@ -564,7 +600,7 @@ Geef alleen geldige JSON in dit formaat:
     { "label": "Leestips", "body": "string" }
   ],
   "bullets": ["string"]
-}`, selectedText, customInstructions, tokenMap)
+}`, selectedText, customInstructions, undefined, selectionOnly)
   },
   {
     id: "word-highlighter",
@@ -585,18 +621,21 @@ Geef alleen geldige JSON in dit formaat:
           { label: "Zelfstandige naamwoorden, werkwoorden, bijvoeglijke naamwoorden", value: "znw-ww-bvnw" },
           { label: "Alleen werkwoorden", value: "werkwoorden" },
           { label: "Alleen zelfstandige naamwoorden", value: "zelfstandige naamwoorden" },
-          { label: "Alleen bijvoeglijke naamwoorden", value: "bijvoeglijke naamwoorden" }
+          { label: "Alleen bijvoeglijke naamwoorden", value: "bijvoeglijke naamwoorden" },
+          { label: "Verwijswoorden", value: "verwijswoorden" },
+          { label: "Signaalwoorden", value: "signaalwoorden" },
+          { label: "Woordsoorten + verwijswoorden + signaalwoorden", value: "alles" }
         ]
       }
     ],
     defaults: {
       focus: "znw-ww-bvnw"
     },
-    buildInstruction: ({ text, selectedText, values, customInstructions, tokenMap }) =>
+    buildInstruction: ({ text, selectedText, values, customInstructions, tokenMap, selectionOnly }) =>
       withSharedContext(`Analyseer de tekst en geef markeringen terug voor woorden in de brontekst.
 
 Tekst:
-${text}
+${selectionOnly && selectedText?.trim() ? selectedText : text}
 
 Instellingen:
 - markeer: ${asText(values.focus)}
@@ -604,15 +643,20 @@ Instellingen:
 Vereisten:
 - gebruik uitsluitend tokenIds uit de meegeleverde tokenlijst
 - geef per woordsoort een aparte highlight-groep terug
-- gebruik kleuren "noun", "verb" en "adjective"
+- gebruik alleen deze kleuren: "noun", "verb", "adjective", "pronoun", "signal"
 - laat tokenIds alleen verwijzen naar woorden die echt in de tekst voorkomen
+- bij verwijswoorden maak je een sectie "Verwijzingen" waarin je per verwijswoord kort noteert waar het naar verwijst
+- voeg voor verwijswoorden ook een expliciete references-array toe die sourceTokenIds koppelt aan targetTokenIds
+- bij signaalwoorden maak je een sectie "Signaalwoorden" waarin je kort uitlegt welk tekstverband ze aangeven
 
 Geef alleen geldige JSON in dit formaat:
 {
   "title": "string",
   "summary": "string",
   "sections": [
-    { "label": "Legenda", "body": "string" }
+    { "label": "Legenda", "body": "string" },
+    { "label": "Verwijzingen", "body": "string" },
+    { "label": "Signaalwoorden", "body": "string" }
   ],
   "highlights": [
     {
@@ -620,8 +664,15 @@ Geef alleen geldige JSON in dit formaat:
       "color": "noun",
       "tokenIds": [1, 4, 10]
     }
+  ],
+  "references": [
+    {
+      "sourceTokenIds": [82],
+      "targetTokenIds": [31],
+      "label": "hij verwijst naar Amir"
+    }
   ]
-}`, selectedText, customInstructions, tokenMap)
+}`, selectedText, customInstructions, tokenMap, selectionOnly)
   },
   {
     id: "open-questions",
@@ -650,11 +701,11 @@ Geef alleen geldige JSON in dit formaat:
       questionCount: 4,
       thinkingLevel: "interpreteren"
     },
-    buildInstruction: ({ text, selectedText, values, customInstructions, tokenMap }) =>
+    buildInstruction: ({ text, selectedText, values, customInstructions, selectionOnly }) =>
       withSharedContext(`Maak open vragen bij de tekst.
 
 Tekst:
-${text}
+${selectionOnly && selectedText?.trim() ? selectedText : text}
 
 Instellingen:
 - aantal vragen: ${asNumber(values.questionCount)}
@@ -669,7 +720,68 @@ Geef alleen geldige JSON in dit formaat:
     { "label": "Nakijkmodel", "body": "string" }
   ],
   "bullets": ["string"]
-}`, selectedText, customInstructions, tokenMap)
+}`, selectedText, customInstructions, undefined, selectionOnly)
+  },
+  {
+    id: "rewrite",
+    name: "Tekst herschrijven",
+    tagline: "Vereenvoudig of verrijk de tekst doelgericht.",
+    description:
+      "Herschrijft de tekst in eenvoudiger taal of verrijkt hem met extra, bewust toegevoegde details.",
+    category: "Verwerking",
+    accent: "#8a5cf6",
+    icon: "11",
+    outputKind: "report",
+    fields: [
+      {
+        id: "mode",
+        label: "Bewerking",
+        type: "select",
+        options: [
+          { label: "Vereenvoudigen", value: "vereenvoudigen" },
+          { label: "Verrijken met extra details", value: "verrijken" }
+        ]
+      },
+      {
+        id: "strength",
+        label: "Mate",
+        type: "select",
+        options: [
+          { label: "Subtiel", value: "subtiel" },
+          { label: "Duidelijk", value: "duidelijk" },
+          { label: "Sterk", value: "sterk" }
+        ]
+      }
+    ],
+    defaults: {
+      mode: "vereenvoudigen",
+      strength: "duidelijk"
+    },
+    buildInstruction: ({ text, selectedText, values, customInstructions, selectionOnly }) =>
+      withSharedContext(`Herschrijf de tekst.
+
+Tekst:
+${selectionOnly && selectedText?.trim() ? selectedText : text}
+
+Instellingen:
+- bewerking: ${asText(values.mode)}
+- mate: ${asText(values.strength)}
+
+Vereisten:
+- geef eerst kort aan wat je hebt aangepast
+- geef daarna de herschreven tekst
+- als de bewerking "verrijken" is, mag je plausibele extra details toevoegen die niet letterlijk in de bron staan
+- benoem bij verrijken expliciet dat er extra details zijn toegevoegd
+
+Geef alleen geldige JSON in dit formaat:
+{
+  "title": "string",
+  "summary": "string",
+  "sections": [
+    { "label": "Wat is aangepast", "body": "string" },
+    { "label": "Herschreven tekst", "body": "string" }
+  ]
+}`, selectedText, customInstructions, undefined, selectionOnly)
   },
   {
     id: "custom-prompt",
@@ -679,7 +791,7 @@ Geef alleen geldige JSON in dit formaat:
       "Gebruik een vrije prompt om modellen, instructies en formuleringen direct te vergelijken.",
     category: "Experiment",
     accent: "#0f8f7a",
-    icon: "11",
+    icon: "12",
     outputKind: "report",
     fields: [
       {
@@ -692,11 +804,11 @@ Geef alleen geldige JSON in dit formaat:
     defaults: {
       task: "Geef een korte analyse van deze tekst voor een docent begrijpend lezen."
     },
-    buildInstruction: ({ text, selectedText, values, customInstructions, tokenMap }) =>
+    buildInstruction: ({ text, selectedText, values, customInstructions, selectionOnly }) =>
       withSharedContext(`Voer deze eigen opdracht uit op basis van de tekst.
 
 Tekst:
-${text}
+${selectionOnly && selectedText?.trim() ? selectedText : text}
 
 Opdracht:
 ${asText(values.task)}
@@ -709,7 +821,7 @@ Geef alleen geldige JSON in dit formaat:
     { "label": "Antwoord", "body": "string" }
   ],
   "bullets": ["string"]
-}`, selectedText, customInstructions, tokenMap)
+}`, selectedText, customInstructions, undefined, selectionOnly)
   }
 ];
 

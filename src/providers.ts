@@ -1,4 +1,4 @@
-import type { ImageAsset, QuizQuestion, ToolDefinition, ToolOutput } from "./types";
+import type { ImageAsset, QuizQuestion, TokenUsage, ToolDefinition, ToolOutput } from "./types";
 
 export type ProviderId = "openai" | "anthropic" | "google" | "mistral" | "groq";
 
@@ -13,7 +13,7 @@ export type ProviderConfig = {
     apiKey: string;
     model: string;
     instruction: string;
-  }) => Promise<string>;
+  }) => Promise<{ text: string; usage?: TokenUsage }>;
 };
 
 const SYSTEM_PROMPT = `Je bent BegrAIp, een didactische AI-assistent voor begrijpend lezen.
@@ -37,6 +37,15 @@ const cleanJson = (text: string): string => {
 const parseToolOutput = (raw: string): ToolOutput => JSON.parse(cleanJson(raw)) as ToolOutput;
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
+const normalizeTextBlock = (value: string) =>
+  value
+    .replace(/\r/g, "")
+    .replace(/```+/g, "")
+    .replace(/^\s{0,3}#{1,6}\s*/gm, "")
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/__(.*?)__/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .trim();
 
 const isValidQuizQuestion = (value: unknown): value is QuizQuestion =>
   isRecord(value) &&
@@ -47,18 +56,23 @@ const isValidQuizQuestion = (value: unknown): value is QuizQuestion =>
 
 const normalizeToolOutput = (output: ToolOutput, tool: ToolDefinition): ToolOutput => {
   const normalized: ToolOutput = {
-    title: typeof output.title === "string" ? output.title : tool.name,
-    summary: typeof output.summary === "string" ? output.summary : "",
+    title: typeof output.title === "string" ? normalizeTextBlock(output.title) : tool.name,
+    summary: typeof output.summary === "string" ? normalizeTextBlock(output.summary) : "",
     sections: Array.isArray(output.sections)
       ? output.sections.filter(
           (section): section is { label: string; body: string } =>
             isRecord(section) &&
             typeof section.label === "string" &&
             typeof section.body === "string"
-        )
+        ).map((section) => ({
+          label: normalizeTextBlock(section.label),
+          body: normalizeTextBlock(section.body)
+        }))
       : undefined,
     bullets: Array.isArray(output.bullets)
-      ? output.bullets.filter((bullet): bullet is string => typeof bullet === "string")
+      ? output.bullets
+          .filter((bullet): bullet is string => typeof bullet === "string")
+          .map((bullet) => normalizeTextBlock(bullet).replace(/^[-*]\s+/, ""))
       : undefined,
     highlights: Array.isArray(output.highlights)
       ? output.highlights.filter(
@@ -76,7 +90,13 @@ const normalizeToolOutput = (output: ToolOutput, tool: ToolDefinition): ToolOutp
             isRecord(item) &&
             typeof item.term === "string" &&
             typeof item.definition === "string"
-        )
+        ).map((item) => ({
+          ...item,
+          term: normalizeTextBlock(item.term),
+          definition: normalizeTextBlock(item.definition),
+          category: typeof item.category === "string" ? normalizeTextBlock(item.category) : undefined,
+          example: typeof item.example === "string" ? normalizeTextBlock(item.example) : undefined
+        }))
       : undefined,
     images: Array.isArray(output.images)
       ? output.images.filter(
@@ -85,17 +105,57 @@ const normalizeToolOutput = (output: ToolOutput, tool: ToolDefinition): ToolOutp
             typeof image.title === "string" &&
             typeof image.prompt === "string" &&
             typeof image.alt === "string"
-        )
+        ).map((image) => ({
+          ...image,
+          title: normalizeTextBlock(image.title),
+          prompt: normalizeTextBlock(image.prompt),
+          alt: normalizeTextBlock(image.alt)
+        }))
+      : undefined,
+    timeline: Array.isArray(output.timeline)
+      ? output.timeline.filter(
+          (item): item is NonNullable<ToolOutput["timeline"]>[number] =>
+            isRecord(item) && typeof item.title === "string"
+        ).map((item) => ({
+          title: normalizeTextBlock(item.title),
+          detail: typeof item.detail === "string" ? normalizeTextBlock(item.detail) : undefined,
+          cause: typeof item.cause === "string" ? normalizeTextBlock(item.cause) : undefined,
+          effect: typeof item.effect === "string" ? normalizeTextBlock(item.effect) : undefined
+        }))
+      : undefined,
+    references: Array.isArray(output.references)
+      ? output.references.filter(
+          (item): item is NonNullable<ToolOutput["references"]>[number] =>
+            isRecord(item) &&
+            Array.isArray(item.sourceTokenIds) &&
+            item.sourceTokenIds.every((tokenId) => typeof tokenId === "number") &&
+            Array.isArray(item.targetTokenIds) &&
+            item.targetTokenIds.every((tokenId) => typeof tokenId === "number")
+        ).map((item) => ({
+          sourceTokenIds: item.sourceTokenIds,
+          targetTokenIds: item.targetTokenIds,
+          label: typeof item.label === "string" ? normalizeTextBlock(item.label) : undefined
+        }))
       : undefined,
     quiz:
       isRecord(output.quiz) &&
       typeof output.quiz.title === "string" &&
       Array.isArray(output.quiz.questions)
         ? {
-            title: output.quiz.title,
+            title: normalizeTextBlock(output.quiz.title),
             instructions:
-              typeof output.quiz.instructions === "string" ? output.quiz.instructions : undefined,
-            questions: output.quiz.questions.filter(isValidQuizQuestion)
+              typeof output.quiz.instructions === "string"
+                ? normalizeTextBlock(output.quiz.instructions)
+                : undefined,
+            questions: output.quiz.questions.filter(isValidQuizQuestion).map((question) => ({
+              ...question,
+              prompt: normalizeTextBlock(question.prompt),
+              choices: question.choices.map((choice) => normalizeTextBlock(choice)),
+              explanation:
+                typeof question.explanation === "string"
+                  ? normalizeTextBlock(question.explanation)
+                  : undefined
+            }))
           }
         : undefined
   };
@@ -122,6 +182,24 @@ const readOpenAIStyleText = (payload: unknown): string | undefined => {
   return data.choices?.[0]?.message?.content;
 };
 
+const readOpenAIStyleUsage = (payload: unknown): TokenUsage | undefined => {
+  const data = payload as {
+    usage?: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      total_tokens?: number;
+    };
+  };
+  if (!data.usage) {
+    return undefined;
+  }
+  return {
+    inputTokens: data.usage.prompt_tokens,
+    outputTokens: data.usage.completion_tokens,
+    totalTokens: data.usage.total_tokens
+  };
+};
+
 const readAnthropicText = (payload: unknown): string | undefined => {
   const data = payload as {
     content?: Array<{ type?: string; text?: string }>;
@@ -132,6 +210,28 @@ const readAnthropicText = (payload: unknown): string | undefined => {
     .join("\n");
 };
 
+const readAnthropicUsage = (payload: unknown): TokenUsage | undefined => {
+  const data = payload as {
+    usage?: {
+      input_tokens?: number;
+      output_tokens?: number;
+    };
+  };
+  if (!data.usage) {
+    return undefined;
+  }
+  const inputTokens = data.usage.input_tokens;
+  const outputTokens = data.usage.output_tokens;
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens:
+      typeof inputTokens === "number" || typeof outputTokens === "number"
+        ? (inputTokens ?? 0) + (outputTokens ?? 0)
+        : undefined
+  };
+};
+
 const readGoogleText = (payload: unknown): string | undefined => {
   const data = payload as {
     candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
@@ -139,6 +239,24 @@ const readGoogleText = (payload: unknown): string | undefined => {
   return data.candidates?.[0]?.content?.parts
     ?.map((part) => part.text ?? "")
     .join("\n");
+};
+
+const readGoogleUsage = (payload: unknown): TokenUsage | undefined => {
+  const data = payload as {
+    usageMetadata?: {
+      promptTokenCount?: number;
+      candidatesTokenCount?: number;
+      totalTokenCount?: number;
+    };
+  };
+  if (!data.usageMetadata) {
+    return undefined;
+  }
+  return {
+    inputTokens: data.usageMetadata.promptTokenCount,
+    outputTokens: data.usageMetadata.candidatesTokenCount,
+    totalTokens: data.usageMetadata.totalTokenCount
+  };
 };
 
 const parseErrorMessage = async (response: Response, fallback: string) => {
@@ -153,9 +271,58 @@ const parseErrorMessage = async (response: Response, fallback: string) => {
   }
 };
 
+const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+const parseRetryAfterMs = (response: Response) => {
+  const rawValue = response.headers.get("retry-after");
+  if (!rawValue) {
+    return undefined;
+  }
+  const seconds = Number(rawValue);
+  if (Number.isFinite(seconds)) {
+    return Math.max(0, seconds * 1000);
+  }
+  const retryAt = Date.parse(rawValue);
+  if (Number.isFinite(retryAt)) {
+    return Math.max(0, retryAt - Date.now());
+  }
+  return undefined;
+};
+
+const fetchWithRateLimitRetry = async (
+  input: RequestInfo | URL,
+  init: RequestInit,
+  providerLabel: string,
+  maxRetries = 2
+) => {
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    const response = await fetch(input, init);
+    if (response.status !== 429) {
+      return response;
+    }
+    if (attempt === maxRetries) {
+      throw new Error(
+        await parseErrorMessage(
+          response,
+          `${providerLabel} gaf een 429 rate-limit fout. Er gaan dan te veel verzoeken tegelijk naar die API. Probeer het zo opnieuw of wacht even.`
+        )
+      );
+    }
+    await sleep(parseRetryAfterMs(response) ?? 1200 * (attempt + 1));
+  }
+  throw new Error(`${providerLabel} gaf een 429 rate-limit fout.`);
+};
+
 const ANTHROPIC_MESSAGES_ENDPOINT = import.meta.env.DEV
   ? "/api/anthropic/v1/messages"
   : "https://api.anthropic.com/v1/messages";
+
+const supportsCustomTemperature = (providerLabel: string, model: string) => {
+  if (providerLabel !== "OpenAI") {
+    return true;
+  }
+  return !/^gpt-5($|[-.])/i.test(model);
+};
 
 const runOpenAICompatible = async (input: {
   apiKey: string;
@@ -165,22 +332,31 @@ const runOpenAICompatible = async (input: {
   instruction: string;
   extraHeaders?: Record<string, string>;
 }) => {
-  const response = await fetch(input.endpoint, {
+  const body: Record<string, unknown> = {
+    model: input.model,
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: input.instruction }
+    ]
+  };
+
+  if (supportsCustomTemperature(input.providerLabel, input.model)) {
+    body.temperature = 0.7;
+  }
+
+  const response = await fetchWithRateLimitRetry(
+    input.endpoint,
+    {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${input.apiKey}`,
       ...input.extraHeaders
     },
-    body: JSON.stringify({
-      model: input.model,
-      temperature: 0.7,
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: input.instruction }
-      ]
-    })
-  });
+    body: JSON.stringify(body)
+    },
+    input.providerLabel
+  );
 
   if (!response.ok) {
     throw new Error(
@@ -193,7 +369,10 @@ const runOpenAICompatible = async (input: {
   if (!text) {
     throw new Error(`Geen inhoud ontvangen van ${input.providerLabel}.`);
   }
-  return text;
+  return {
+    text,
+    usage: readOpenAIStyleUsage(payload)
+  };
 };
 
 const runAnthropic = async (input: {
@@ -201,7 +380,9 @@ const runAnthropic = async (input: {
   model: string;
   instruction: string;
 }) => {
-  const response = await fetch(ANTHROPIC_MESSAGES_ENDPOINT, {
+  const response = await fetchWithRateLimitRetry(
+    ANTHROPIC_MESSAGES_ENDPOINT,
+    {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -221,7 +402,9 @@ const runAnthropic = async (input: {
         }
       ]
     })
-  });
+    },
+    "Anthropic"
+  );
 
   if (!response.ok) {
     throw new Error(await parseErrorMessage(response, `Anthropic gaf een fout (${response.status}).`));
@@ -232,7 +415,10 @@ const runAnthropic = async (input: {
   if (!text) {
     throw new Error("Geen inhoud ontvangen van Anthropic.");
   }
-  return text;
+  return {
+    text,
+    usage: readAnthropicUsage(payload)
+  };
 };
 
 const runGoogle = async (input: {
@@ -241,7 +427,9 @@ const runGoogle = async (input: {
   instruction: string;
 }) => {
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${input.model}:generateContent?key=${encodeURIComponent(input.apiKey)}`;
-  const response = await fetch(endpoint, {
+  const response = await fetchWithRateLimitRetry(
+    endpoint,
+    {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -260,7 +448,9 @@ const runGoogle = async (input: {
         temperature: 0.7
       }
     })
-  });
+    },
+    "Google AI"
+  );
 
   if (!response.ok) {
     throw new Error(await parseErrorMessage(response, `Google AI gaf een fout (${response.status}).`));
@@ -271,11 +461,16 @@ const runGoogle = async (input: {
   if (!text) {
     throw new Error("Geen inhoud ontvangen van Google AI.");
   }
-  return text;
+  return {
+    text,
+    usage: readGoogleUsage(payload)
+  };
 };
 
 const generateOpenAIImage = async (apiKey: string, prompt: string, size: string) => {
-  const response = await fetch("https://api.openai.com/v1/images/generations", {
+  const response = await fetchWithRateLimitRetry(
+    "https://api.openai.com/v1/images/generations",
+    {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -286,7 +481,9 @@ const generateOpenAIImage = async (apiKey: string, prompt: string, size: string)
       prompt,
       size
     })
-  });
+    },
+    "OpenAI image"
+  );
 
   if (!response.ok) {
     throw new Error(await parseErrorMessage(response, `OpenAI image gaf een fout (${response.status}).`));
@@ -391,38 +588,49 @@ export const runTool = async (input: {
   tool: ToolDefinition;
   instruction: string;
   values: Record<string, string | number | boolean>;
-}): Promise<ToolOutput> => {
+}): Promise<{ output: ToolOutput; usage?: TokenUsage }> => {
   const provider = PROVIDER_BY_ID[input.providerId];
   ensureApiKey(input.apiKey, provider.label);
 
-  const rawText = await provider.runText({
+  const providerResult = await provider.runText({
     apiKey: input.apiKey,
     model: input.model,
     instruction: input.instruction
   });
 
-  const parsed = normalizeToolOutput(parseToolOutput(rawText), input.tool);
+  const parsed = normalizeToolOutput(parseToolOutput(providerResult.text), input.tool);
   const filteredSections =
     input.tool.id === "text-structure" && input.values.includeTips === false
       ? parsed.sections?.filter((section) => section.label.toLowerCase() !== "leestips")
       : parsed.sections;
+  const filteredBullets =
+    input.tool.id === "summary" && input.values.format === "doorlopende tekst"
+      ? undefined
+      : parsed.bullets;
   const normalized: ToolOutput = {
     ...parsed,
-    sections: filteredSections
+    sections: filteredSections,
+    bullets: filteredBullets
   };
 
   if (input.tool.outputKind !== "images" || !normalized.images?.length) {
-    return normalized;
+    return {
+      usage: providerResult.usage,
+      output: normalized
+    };
   }
 
   if (!provider.supportsImages) {
     return {
-      ...normalized,
-      images: normalized.images.map((asset: ImageAsset) => ({
-        ...asset,
-        aspectRatio: String(input.values.aspect ?? "1536x1024"),
-        imageError: `${provider.label} is in BegrAIp nu alleen gekoppeld voor tekstoutput. De prompts zijn wel al gegenereerd.`
-      }))
+      usage: providerResult.usage,
+      output: {
+        ...normalized,
+        images: normalized.images.map((asset: ImageAsset) => ({
+          ...asset,
+          aspectRatio: String(input.values.aspect ?? "1536x1024"),
+          imageError: `${provider.label} is in BegrAIp nu alleen gekoppeld voor tekstoutput. De prompts zijn wel al gegenereerd.`
+        }))
+      }
     };
   }
 
@@ -443,7 +651,10 @@ export const runTool = async (input: {
   );
 
   return {
-    ...normalized,
-    images: imageResults
+    usage: providerResult.usage,
+    output: {
+      ...normalized,
+      images: imageResults
+    }
   };
 };
