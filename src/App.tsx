@@ -68,6 +68,21 @@ const formatCostBreakdown = (cost?: {
   `Geschatte standaard API-kosten ${formatUsd(cost?.inputCostUsd)} in · ${formatUsd(cost?.outputCostUsd)} uit · ${formatUsd(cost?.totalCostUsd)} totaal`;
 const costDisclaimer = "Free tier / promo niet meegerekend";
 const customValueId = (fieldId: string) => `${fieldId}__custom`;
+const toAnalyticsKey = (value: string) =>
+  value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 24);
+const toAnalyticsString = (value: string | number | boolean) =>
+  String(value).slice(0, 100);
+const getSettingsAnalyticsParams = (settings: Record<string, string | number | boolean>) =>
+  Object.fromEntries(
+    Object.entries(settings)
+      .filter(([key]) => !key.endsWith("__custom"))
+      .slice(0, 8)
+      .map(([key, value]) => [`setting_${toAnalyticsKey(key)}`, toAnalyticsString(value)])
+  );
 
 const resolveToolValues = (
   tool: ToolDefinition,
@@ -447,15 +462,22 @@ export const App = () => {
     };
 
     setRunGroups((current) => [pendingGroup, ...current]);
+    setActiveResultId(null);
     setActiveTab("runs");
     setError(null);
 
     trackEvent("tool_run_started", {
       tool_id: selectedTool.id,
       provider_count: enabledProviderIds.length,
+      provider_ids: enabledProviderIds.join(",").slice(0, 100),
+      model_ids: enabledProviderIds
+        .map((providerId) => modelsByProvider[providerId] ?? PROVIDER_BY_ID[providerId].defaultModel)
+        .join(",")
+        .slice(0, 100),
       has_selection: Boolean(selectedText),
       selection_only: selectionOnly,
-      selected_text_length: selectedText.length
+      selected_text_length: selectedText.length,
+      ...getSettingsAnalyticsParams(selectedValues)
     });
 
     for (const pendingRun of pendingGroup.runs) {
@@ -524,7 +546,11 @@ export const App = () => {
             input_tokens: result.usage?.inputTokens,
             output_tokens: result.usage?.outputTokens,
             total_tokens: result.usage?.totalTokens,
-            estimated_cost_usd: cost?.totalCostUsd
+            estimated_cost_usd: cost?.totalCostUsd,
+            has_selection: Boolean(selectedText),
+            selection_only: selectionOnly,
+            selected_text_length: selectedText.length,
+            ...getSettingsAnalyticsParams(selectedValues)
           });
           if (shouldSelect && autoSelectRunId) {
             setActiveResultId(autoSelectRunId);
@@ -570,7 +596,11 @@ export const App = () => {
             provider_id: pendingRun.providerId,
             model: pendingRun.model,
             duration_ms: Math.round(durationMs),
-            error_message: message.slice(0, 120)
+            error_message: message.slice(0, 120),
+            has_selection: Boolean(selectedText),
+            selection_only: selectionOnly,
+            selected_text_length: selectedText.length,
+            ...getSettingsAnalyticsParams(selectedValues)
           });
         }
       })();
