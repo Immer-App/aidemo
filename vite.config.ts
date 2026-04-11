@@ -10,6 +10,10 @@ export default defineConfig({
         target: "https://api.anthropic.com",
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/anthropic/, "")
+      },
+      "/api/usage": {
+        target: "http://localhost:8787",
+        changeOrigin: true
       }
     }
   }

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { trackEvent, trackProviderToggle, trackSelectionOnlyToggle } from "./analytics";
 import { DEFAULT_API_KEYS, PROVIDER_BY_ID, PROVIDERS, runTool } from "./openai";
 import { estimateCost, PROVIDER_MODEL_PRESETS } from "./pricing";
 import { TOOL_CATALOG, TOOL_BY_ID } from "./toolCatalog";
@@ -9,7 +10,6 @@ const API_KEY_STORAGE_KEY = "begraip-api-keys";
 const MODEL_STORAGE_KEY = "begraip-models";
 const ENABLED_PROVIDER_STORAGE_KEY = "begraip-enabled-providers";
 const SELECTION_ONLY_STORAGE_KEY = "begraip-selection-only";
-const USAGE_LOG_STORAGE_KEY = "begraip-usage-log";
 const DEMO_TEXT = `Op een winderige ochtend liep Amir met zijn oma over de dijk langs de rivier. 
 De lucht was grijs, maar op het water dreven glinsterende strepen licht. 
 Oma vertelde dat de rivier al eeuwenlang belangrijk was voor het dorp: vissers verdienden er hun brood, handelaren brachten goederen mee en kinderen leerden aan de oever zwemmen.
@@ -60,6 +60,13 @@ const formatUsd = (amount?: number) =>
   typeof amount === "number" ? `$${amount.toFixed(amount < 0.01 ? 4 : 2)}` : "n.b.";
 const formatTokenBreakdown = (usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number }) =>
   `Input tokens ${formatTokens(usage?.inputTokens)} · Output tokens ${formatTokens(usage?.outputTokens)} · Totaal tokens ${formatTokens(usage?.totalTokens)}`;
+const formatCostBreakdown = (cost?: {
+  inputCostUsd?: number;
+  outputCostUsd?: number;
+  totalCostUsd?: number;
+}) =>
+  `Geschatte standaard API-kosten ${formatUsd(cost?.inputCostUsd)} in · ${formatUsd(cost?.outputCostUsd)} uit · ${formatUsd(cost?.totalCostUsd)} totaal`;
+const costDisclaimer = "Free tier / promo niet meegerekend";
 const customValueId = (fieldId: string) => `${fieldId}__custom`;
 
 const resolveToolValues = (
@@ -131,6 +138,32 @@ const getSafeQuizQuestions = (questions: QuizQuestion[] | undefined) =>
       )
     : [];
 
+const logUsageEvent = (entry: UsageLogEntry) => {
+  const payload = JSON.stringify(entry);
+  const endpoint = import.meta.env.VITE_USAGE_LOG_ENDPOINT || "/api/usage";
+
+  try {
+    if (navigator.sendBeacon) {
+      const blob = new Blob([payload], { type: "application/json" });
+      navigator.sendBeacon(endpoint, blob);
+      return;
+    }
+  } catch {
+    // Fall through to fetch.
+  }
+
+  void fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: payload,
+    keepalive: true
+  }).catch(() => {
+    // Logging must never break the UI.
+  });
+};
+
 export const App = () => {
   const [activeTab, setActiveTab] = useState<TopTab>("input");
   const [apiKeysByProvider, setApiKeysByProvider] = useState<Record<string, string>>(() => ({
@@ -159,7 +192,6 @@ export const App = () => {
   const [answersByResult, setAnswersByResult] = useState<Record<string, Record<number, number>>>({});
   const [error, setError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(Date.now());
-  const [usageLog, setUsageLog] = useState<UsageLogEntry[]>([]);
   const [activeReferenceSourceTokenId, setActiveReferenceSourceTokenId] = useState<number | null>(null);
 
   useEffect(() => {
@@ -193,10 +225,6 @@ export const App = () => {
       setSelectionOnly(savedSelectionOnly === "true");
     }
 
-    const savedUsageLog = window.localStorage.getItem(USAGE_LOG_STORAGE_KEY);
-    if (savedUsageLog) {
-      setUsageLog(JSON.parse(savedUsageLog) as UsageLogEntry[]);
-    }
   }, []);
 
   useEffect(() => {
@@ -214,10 +242,6 @@ export const App = () => {
   useEffect(() => {
     window.localStorage.setItem(SELECTION_ONLY_STORAGE_KEY, String(selectionOnly));
   }, [selectionOnly]);
-
-  useEffect(() => {
-    window.localStorage.setItem(USAGE_LOG_STORAGE_KEY, JSON.stringify(usageLog));
-  }, [usageLog]);
 
   useEffect(() => {
     setSelectedRange((current) => ({
@@ -297,6 +321,12 @@ export const App = () => {
     setActiveReferenceSourceTokenId(null);
   }, [activeResult?.id]);
 
+  useEffect(() => {
+    trackEvent("app_loaded", {
+      initial_provider_count: enabledProviderIds.length
+    });
+  }, []);
+
   const providersWithoutImages =
     selectedTool.outputKind === "images"
       ? PROVIDERS.filter(
@@ -323,31 +353,6 @@ export const App = () => {
     };
   })();
 
-  const totalLoggedTokens = useMemo(
-    () =>
-      usageLog.reduce((sum, entry) => sum + (entry.usage?.totalTokens ?? 0), 0),
-    [usageLog]
-  );
-  const totalLoggedCostUsd = useMemo(
-    () =>
-      usageLog.reduce((sum, entry) => sum + (entry.cost?.totalCostUsd ?? 0), 0),
-    [usageLog]
-  );
-
-  const appendUsageLog = (entry: UsageLogEntry) => {
-    setUsageLog((current) => [entry, ...current].slice(0, 500));
-  };
-
-  const exportUsageLog = () => {
-    const blob = new Blob([JSON.stringify(usageLog, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `begraip-usage-log-${new Date().toISOString()}.json`;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
-
   const updateValue = (field: ToolField, nextValue: string | number | boolean) => {
     setValuesByTool((current) => ({
       ...current,
@@ -369,11 +374,13 @@ export const App = () => {
   };
 
   const toggleProvider = (providerId: ProviderId) => {
-    setEnabledProviderIds((current) =>
-      current.includes(providerId)
-        ? current.filter((item) => item !== providerId)
-        : [...current, providerId]
-    );
+    setEnabledProviderIds((current) => {
+      const enabled = !current.includes(providerId);
+      trackProviderToggle(providerId, enabled);
+      return enabled
+        ? [...current, providerId]
+        : current.filter((item) => item !== providerId);
+    });
   };
 
   const updateSelectionFromTextArea = (event: React.SyntheticEvent<HTMLTextAreaElement>) => {
@@ -440,6 +447,14 @@ export const App = () => {
     setActiveTab("runs");
     setError(null);
 
+    trackEvent("tool_run_started", {
+      tool_id: selectedTool.id,
+      provider_count: enabledProviderIds.length,
+      has_selection: Boolean(selectedText),
+      selection_only: selectionOnly,
+      selected_text_length: selectedText.length
+    });
+
     for (const pendingRun of pendingGroup.runs) {
       void (async () => {
         const startedAt = performance.now();
@@ -483,7 +498,7 @@ export const App = () => {
           );
 
           setAnswersByResult((current) => ({ ...current, [pendingRun.id]: {} }));
-          appendUsageLog({
+          logUsageEvent({
             id: pendingRun.id,
             createdAt,
             toolId: selectedTool.id,
@@ -497,6 +512,16 @@ export const App = () => {
             settings: selectedValues,
             usage: result.usage,
             cost
+          });
+          trackEvent("tool_run_completed", {
+            tool_id: selectedTool.id,
+            provider_id: pendingRun.providerId,
+            model: pendingRun.model,
+            duration_ms: Math.round(durationMs),
+            input_tokens: result.usage?.inputTokens,
+            output_tokens: result.usage?.outputTokens,
+            total_tokens: result.usage?.totalTokens,
+            estimated_cost_usd: cost?.totalCostUsd
           });
           if (shouldSelect && autoSelectRunId) {
             setActiveResultId(autoSelectRunId);
@@ -523,7 +548,7 @@ export const App = () => {
                 : group
             )
           );
-          appendUsageLog({
+          logUsageEvent({
             id: pendingRun.id,
             createdAt,
             toolId: selectedTool.id,
@@ -536,6 +561,13 @@ export const App = () => {
             selectedTextLength: selectedText.length,
             settings: selectedValues,
             error: message
+          });
+          trackEvent("tool_run_failed", {
+            tool_id: selectedTool.id,
+            provider_id: pendingRun.providerId,
+            model: pendingRun.model,
+            duration_ms: Math.round(durationMs),
+            error_message: message.slice(0, 120)
           });
         }
       })();
@@ -616,7 +648,10 @@ export const App = () => {
                     <input
                       type="checkbox"
                       checked={selectionOnly}
-                      onChange={(event) => setSelectionOnly(event.target.checked)}
+                      onChange={(event) => {
+                        setSelectionOnly(event.target.checked);
+                        trackSelectionOnlyToggle(event.target.checked);
+                      }}
                     />
                     <span>Alleen geselecteerde tekst naar het model sturen</span>
                   </label>
@@ -906,26 +941,6 @@ export const App = () => {
                 <span>Vergelijkingen</span>
                 <strong>Resultaten per prompt</strong>
               </div>
-              <div className="usage-toolbar">
-                <div className="usage-summary-card">
-                  <strong>{usageLog.length}</strong>
-                  <span>gelogde requests</span>
-                </div>
-                <div className="usage-summary-card">
-                  <strong>{formatTokens(totalLoggedTokens)}</strong>
-                  <span>gelogde tokens</span>
-                </div>
-                <div className="usage-summary-card">
-                  <strong>{formatUsd(totalLoggedCostUsd)}</strong>
-                  <span>geschatte kosten</span>
-                </div>
-                <button type="button" className="secondary-button" onClick={exportUsageLog}>
-                  Exporteer log
-                </button>
-                <button type="button" className="secondary-button" onClick={() => setUsageLog([])}>
-                  Wis log
-                </button>
-              </div>
               <div className="run-group-list">
                 {runGroups.length ? (
                   runGroups.map((group) => {
@@ -964,6 +979,11 @@ export const App = () => {
                                 if (run.status !== "success") {
                                   return;
                                 }
+                                trackEvent("result_selected", {
+                                  tool_id: group.toolId,
+                                  provider_id: run.providerId,
+                                  model: run.model
+                                });
                                 setRunGroups((current) =>
                                   current.map((entry) =>
                                     entry.id === group.id ? { ...entry, autoSelectLocked: true } : entry
@@ -984,7 +1004,7 @@ export const App = () => {
                               </p>
                               {run.status !== "pending" ? (
                                 <small className="token-meta">
-                                  {formatTokenBreakdown(run.usage)} · Kosten {formatUsd(run.cost?.totalCostUsd)}
+                                  {formatTokenBreakdown(run.usage)} · {formatCostBreakdown(run.cost)} · {costDisclaimer}
                                 </small>
                               ) : null}
                             </button>
@@ -1030,8 +1050,9 @@ export const App = () => {
                     {formatTokenBreakdown(activeResult.usage)}
                   </span>
                   <span className="pill">
-                    Kosten: {formatUsd(activeResult.cost?.inputCostUsd)} in · {formatUsd(activeResult.cost?.outputCostUsd)} uit · {formatUsd(activeResult.cost?.totalCostUsd)} totaal
+                    {formatCostBreakdown(activeResult.cost)}
                   </span>
+                  <span className="pill">{costDisclaimer}</span>
                   {activeResult.selectedText ? <span className="pill">Selectie actief</span> : null}
                 </div>
 
@@ -1077,11 +1098,16 @@ export const App = () => {
                               key={token.key}
                               className={`token-inline-button ${className}`}
                               title={reference.label ?? highlight?.label}
-                              onClick={() =>
+                              onClick={() => {
+                                trackEvent("reference_clicked", {
+                                  tool_id: activeResult?.toolId,
+                                  provider_id: activeResult?.providerId,
+                                  target_count: reference.targetTokenIds.length
+                                });
                                 setActiveReferenceSourceTokenId((current) =>
                                   current === token.wordId ? null : token.wordId!
-                                )
-                              }
+                                );
+                              }}
                             >
                               {token.text}
                             </button>
@@ -1254,23 +1280,6 @@ export const App = () => {
                   <summary>Bekijk gebruikte prompt</summary>
                   <pre>{activeResult.prompt}</pre>
                 </details>
-
-                {usageLog.length ? (
-                  <section className="content-block">
-                    <h3>Recente usage-log</h3>
-                    <div className="usage-log-list">
-                      {usageLog.slice(0, 12).map((entry) => (
-                        <article className="usage-log-card" key={`${entry.id}-${entry.createdAt}`}>
-                          <strong>{entry.toolName} · {entry.providerLabel}</strong>
-                          <p>{entry.model}</p>
-                          <small className="token-meta">
-                            {formatClockTime(entry.createdAt)} · {entry.status} · {formatTokenBreakdown(entry.usage)} · Kosten {formatUsd(entry.cost?.totalCostUsd)}
-                          </small>
-                        </article>
-                      ))}
-                    </div>
-                  </section>
-                ) : null}
               </>
             ) : (
               <div className="empty-state">
