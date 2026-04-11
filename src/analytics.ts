@@ -24,13 +24,19 @@ export const initAnalytics = () => {
   document.head.appendChild(script);
 
   window.dataLayer = window.dataLayer || [];
-  window.gtag = function gtag(...args: unknown[]) {
-    window.dataLayer?.push(args);
+  window.gtag = function gtag() {
+    window.dataLayer?.push(arguments);
   };
 
   window.gtag("js", new Date());
   window.gtag("config", measurementId, {
-    anonymize_ip: true
+    anonymize_ip: true,
+    send_page_view: true
+  });
+  window.gtag("event", "page_view", {
+    page_title: document.title,
+    page_location: window.location.href,
+    page_path: window.location.pathname
   });
 };
 

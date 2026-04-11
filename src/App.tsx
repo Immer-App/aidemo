@@ -139,8 +139,11 @@ const getSafeQuizQuestions = (questions: QuizQuestion[] | undefined) =>
     : [];
 
 const logUsageEvent = (entry: UsageLogEntry) => {
+  const endpoint = import.meta.env.VITE_USAGE_LOG_ENDPOINT?.trim();
+  if (!endpoint) {
+    return;
+  }
   const payload = JSON.stringify(entry);
-  const endpoint = import.meta.env.VITE_USAGE_LOG_ENDPOINT || "/api/usage";
 
   try {
     if (navigator.sendBeacon) {
