@@ -131,6 +131,13 @@ button {
   margin-bottom: 18px;
 }
 
+.section-head-with-action {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
 .section-head.compact {
   margin-bottom: 10px;
 }
@@ -283,6 +290,16 @@ button {
   margin-top: 14px;
   color: var(--heading);
   font-weight: 700;
+}
+
+.clear-selection-button {
+  flex: 0 0 auto;
+  padding: 10px 16px;
+}
+
+.clear-selection-button:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 
 .selection-toggle input {
@@ -743,6 +760,12 @@ button {
   gap: 10px;
 }
 
+.formatted-list {
+  margin: 0;
+  padding-left: 1.4rem;
+  color: var(--muted);
+}
+
 .bullet-list {
   margin: 0;
   padding-left: 18px;
@@ -768,6 +791,12 @@ button {
   border: 1px solid #e9ebf0;
   background: #fbfbfc;
   min-width: 0;
+}
+
+.quiz-feedback {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
 }
 
 .glossary-head {
@@ -1082,7 +1111,8 @@ button {
   .quiz-head,
   .tool-select-row,
   .prompt-actions,
-  .run-group-head {
+  .run-group-head,
+  .section-head-with-action {
     flex-direction: column;
     align-items: stretch;
   }

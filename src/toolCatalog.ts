@@ -102,7 +102,9 @@ Vereisten:
 - maak geloofwaardige afleiders
 - gebruik Nederlands
 - als foute antwoorden toelichten uit staat, laat dan alleen zien waarom het goede antwoord klopt
-- als foute antwoorden toelichten aan staat, noem in de explanation ook kort waarom de andere opties niet kloppen
+- als foute antwoorden toelichten aan staat, geef dan eerst per fout antwoordoptie een korte uitleg waarom die specifieke optie niet klopt
+- leg daarna pas apart uit waarom het goede antwoord wel klopt
+- maak wrongExplanations even lang als choices; zet op de plek van het goede antwoord een lege string
 
 Geef alleen geldige JSON in dit formaat:
 {
@@ -116,7 +118,8 @@ Geef alleen geldige JSON in dit formaat:
         "prompt": "string",
         "choices": ["string"],
         "correctIndex": 0,
-        "explanation": "string"
+        "correctExplanation": "string",
+        "wrongExplanations": ["string"]
       }
     ]
   }
@@ -124,7 +127,7 @@ Geef alleen geldige JSON in dit formaat:
   },
   {
     id: "image-generator",
-    name: "Verhaal in Beeld",
+    name: "Beeld genereren",
     tagline: "Maak beelden bij scènes, personages of moeilijke woorden.",
     description:
       "Zet de tekst om naar gerichte illustraties voor visualisatie, woordenschat en klassengesprek.",
@@ -545,8 +548,7 @@ Geef alleen geldige JSON in dit formaat:
   "sections": [
     { "label": "Personages", "body": "string" },
     { "label": "Relaties", "body": "string" }
-  ],
-  "bullets": ["string"]
+  ]
 }`, selectedText, customInstructions, undefined, selectionOnly)
   },
   {
@@ -614,22 +616,37 @@ Geef alleen geldige JSON in dit formaat:
     outputKind: "report",
     fields: [
       {
-        id: "focus",
-        label: "Markeer",
-        type: "select",
-        options: [
-          { label: "Zelfstandige naamwoorden, werkwoorden, bijvoeglijke naamwoorden", value: "znw-ww-bvnw" },
-          { label: "Alleen werkwoorden", value: "werkwoorden" },
-          { label: "Alleen zelfstandige naamwoorden", value: "zelfstandige naamwoorden" },
-          { label: "Alleen bijvoeglijke naamwoorden", value: "bijvoeglijke naamwoorden" },
-          { label: "Verwijswoorden", value: "verwijswoorden" },
-          { label: "Signaalwoorden", value: "signaalwoorden" },
-          { label: "Woordsoorten + verwijswoorden + signaalwoorden", value: "alles" }
-        ]
+        id: "includeNouns",
+        label: "Zelfstandige naamwoorden",
+        type: "toggle"
+      },
+      {
+        id: "includeVerbs",
+        label: "Werkwoorden",
+        type: "toggle"
+      },
+      {
+        id: "includeAdjectives",
+        label: "Bijvoeglijke naamwoorden",
+        type: "toggle"
+      },
+      {
+        id: "includePronouns",
+        label: "Verwijswoorden",
+        type: "toggle"
+      },
+      {
+        id: "includeSignals",
+        label: "Signaalwoorden",
+        type: "toggle"
       }
     ],
     defaults: {
-      focus: "znw-ww-bvnw"
+      includeNouns: true,
+      includeVerbs: true,
+      includeAdjectives: true,
+      includePronouns: false,
+      includeSignals: false
     },
     buildInstruction: ({ text, selectedText, values, customInstructions, tokenMap, selectionOnly }) =>
       withSharedContext(`Analyseer de tekst en geef markeringen terug voor woorden in de brontekst.
@@ -638,16 +655,21 @@ Tekst:
 ${selectionOnly && selectedText?.trim() ? selectedText : text}
 
 Instellingen:
-- markeer: ${asText(values.focus)}
+- zelfstandige naamwoorden: ${asBool(values.includeNouns) ? "ja" : "nee"}
+- werkwoorden: ${asBool(values.includeVerbs) ? "ja" : "nee"}
+- bijvoeglijke naamwoorden: ${asBool(values.includeAdjectives) ? "ja" : "nee"}
+- verwijswoorden: ${asBool(values.includePronouns) ? "ja" : "nee"}
+- signaalwoorden: ${asBool(values.includeSignals) ? "ja" : "nee"}
 
 Vereisten:
 - gebruik uitsluitend tokenIds uit de meegeleverde tokenlijst
-- geef per woordsoort een aparte highlight-groep terug
+- geef alleen highlight-groepen terug voor categorieen die op "ja" staan
 - gebruik alleen deze kleuren: "noun", "verb", "adjective", "pronoun", "signal"
 - laat tokenIds alleen verwijzen naar woorden die echt in de tekst voorkomen
 - bij verwijswoorden maak je een sectie "Verwijzingen" waarin je per verwijswoord kort noteert waar het naar verwijst
 - voeg voor verwijswoorden ook een expliciete references-array toe die sourceTokenIds koppelt aan targetTokenIds
 - bij signaalwoorden maak je een sectie "Signaalwoorden" waarin je kort uitlegt welk tekstverband ze aangeven
+- als een categorie uit staat, laat die dan volledig weg uit highlights en sections
 
 Geef alleen geldige JSON in dit formaat:
 {
@@ -676,7 +698,7 @@ Geef alleen geldige JSON in dit formaat:
   },
   {
     id: "open-questions",
-    name: "Open Vragencoach",
+    name: "Open vragen genereren",
     tagline: "Genereer verdiepende vragen met nakijkhulp.",
     description:
       "Maakt open vragen over de tekst en geeft criteria voor een sterk antwoord.",
@@ -718,8 +740,7 @@ Geef alleen geldige JSON in dit formaat:
   "sections": [
     { "label": "Open vragen", "body": "string" },
     { "label": "Nakijkmodel", "body": "string" }
-  ],
-  "bullets": ["string"]
+  ]
 }`, selectedText, customInstructions, undefined, selectionOnly)
   },
   {

@@ -42,6 +42,8 @@ export type QuizQuestion = {
   choices: string[];
   correctIndex: number;
   explanation?: string;
+  correctExplanation?: string;
+  wrongExplanations?: string[];
 };
 
 export type GlossaryEntry = {
@@ -99,6 +101,7 @@ export type TokenUsage = {
 export type CostEstimate = {
   inputCostUsd?: number;
   outputCostUsd?: number;
+  imageCostUsd?: number;
   totalCostUsd?: number;
   pricingLabel?: string;
 };
@@ -119,6 +122,7 @@ export type RunResult = {
   settings: Record<string, string | number | boolean>;
   usage?: TokenUsage;
   cost?: CostEstimate;
+  imageGenerationModel?: string;
   output?: ToolOutput;
   error?: string;
 };
@@ -149,5 +153,6 @@ export type UsageLogEntry = {
   settings: Record<string, string | number | boolean>;
   usage?: TokenUsage;
   cost?: CostEstimate;
+  imageGenerationModel?: string;
   error?: string;
 };

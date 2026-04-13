@@ -14,6 +14,20 @@ export type ProviderConfig = {
     model: string;
     instruction: string;
   }) => Promise<{ text: string; usage?: TokenUsage }>;
+  generateImage?: (input: {
+    apiKey: string;
+    model: string;
+    prompt: string;
+    aspect: string;
+  }) => Promise<{ imageUrl: string; model: string }>;
+};
+
+type ToolRunResult = {
+  output: ToolOutput;
+  usage?: TokenUsage;
+  imageGenerationCount?: number;
+  imageGenerationSize?: string;
+  imageGenerationModel?: string;
 };
 
 const SYSTEM_PROMPT = `Je bent BegrAIp, een didactische AI-assistent voor begrijpend lezen.
@@ -53,6 +67,16 @@ const isValidQuizQuestion = (value: unknown): value is QuizQuestion =>
   Array.isArray(value.choices) &&
   value.choices.every((choice) => typeof choice === "string") &&
   typeof value.correctIndex === "number";
+
+const normalizeQuizExplanationList = (value: unknown, choiceCount: number) => {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const normalized = value.map((entry) =>
+    typeof entry === "string" ? normalizeTextBlock(entry) : ""
+  );
+  return normalized.length === choiceCount ? normalized : undefined;
+};
 
 const normalizeToolOutput = (output: ToolOutput, tool: ToolDefinition): ToolOutput => {
   const normalized: ToolOutput = {
@@ -154,7 +178,15 @@ const normalizeToolOutput = (output: ToolOutput, tool: ToolDefinition): ToolOutp
               explanation:
                 typeof question.explanation === "string"
                   ? normalizeTextBlock(question.explanation)
-                  : undefined
+                  : undefined,
+              correctExplanation:
+                typeof question.correctExplanation === "string"
+                  ? normalizeTextBlock(question.correctExplanation)
+                  : undefined,
+              wrongExplanations: normalizeQuizExplanationList(
+                isRecord(question) ? question.wrongExplanations : undefined,
+                question.choices.length
+              )
             }))
           }
         : undefined
@@ -257,6 +289,28 @@ const readGoogleUsage = (payload: unknown): TokenUsage | undefined => {
     outputTokens: data.usageMetadata.candidatesTokenCount,
     totalTokens: data.usageMetadata.totalTokenCount
   };
+};
+
+const readGoogleInlineImage = (payload: unknown): string | undefined => {
+  const data = payload as {
+    candidates?: Array<{
+      content?: {
+        parts?: Array<{
+          inlineData?: { data?: string; mimeType?: string };
+          inline_data?: { data?: string; mime_type?: string };
+        }>;
+      };
+    }>;
+  };
+
+  const part = data.candidates?.[0]?.content?.parts?.find(
+    (entry) => entry.inlineData?.data || entry.inline_data?.data
+  );
+  const encoded = part?.inlineData?.data ?? part?.inline_data?.data;
+  const mimeType =
+    part?.inlineData?.mimeType ?? part?.inline_data?.mime_type ?? "image/png";
+
+  return encoded ? `data:${mimeType};base64,${encoded}` : undefined;
 };
 
 const parseErrorMessage = async (response: Response, fallback: string) => {
@@ -467,6 +521,63 @@ const runGoogle = async (input: {
   };
 };
 
+const GOOGLE_DEFAULT_IMAGE_MODEL = "gemini-2.5-flash-image";
+
+const isGoogleImageModel = (model: string) => /image/i.test(model);
+
+const GOOGLE_ASPECT_RATIO_BY_SIZE: Record<string, string> = {
+  "1024x1024": "1:1",
+  "1536x1024": "3:2",
+  "1024x1536": "2:3"
+};
+
+const generateGoogleImage = async (input: {
+  apiKey: string;
+  model: string;
+  prompt: string;
+  aspect: string;
+}) => {
+  const model = isGoogleImageModel(input.model) ? input.model : GOOGLE_DEFAULT_IMAGE_MODEL;
+  const aspectRatio = GOOGLE_ASPECT_RATIO_BY_SIZE[input.aspect] ?? "1:1";
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(input.apiKey)}`;
+  const response = await fetchWithRateLimitRetry(
+    endpoint,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: input.prompt }]
+          }
+        ],
+        generationConfig: {
+          responseModalities: ["IMAGE"],
+          imageConfig: {
+            aspectRatio
+          }
+        }
+      })
+    },
+    "Google AI image"
+  );
+
+  if (!response.ok) {
+    throw new Error(await parseErrorMessage(response, `Google AI image gaf een fout (${response.status}).`));
+  }
+
+  const payload = (await response.json()) as unknown;
+  const imageUrl = readGoogleInlineImage(payload);
+  if (!imageUrl) {
+    throw new Error("Geen afbeelding ontvangen van Google AI.");
+  }
+
+  return { imageUrl, model };
+};
+
 const generateOpenAIImage = async (apiKey: string, prompt: string, size: string) => {
   const response = await fetchWithRateLimitRetry(
     "https://api.openai.com/v1/images/generations",
@@ -479,7 +590,8 @@ const generateOpenAIImage = async (apiKey: string, prompt: string, size: string)
     body: JSON.stringify({
       model: "gpt-image-1",
       prompt,
-      size
+      size,
+      quality: "medium"
     })
     },
     "OpenAI image"
@@ -512,6 +624,10 @@ export const PROVIDERS: ProviderConfig[] = [
     envKey: "VITE_OPENAI_API_KEY",
     keyPlaceholder: "sk-...",
     supportsImages: true,
+    generateImage: async ({ apiKey, prompt, aspect }) => ({
+      imageUrl: await generateOpenAIImage(apiKey, prompt, aspect),
+      model: "gpt-image-1"
+    }),
     runText: ({ apiKey, model, instruction }) =>
       runOpenAICompatible({
         apiKey,
@@ -536,8 +652,9 @@ export const PROVIDERS: ProviderConfig[] = [
     defaultModel: "gemini-2.5-flash",
     envKey: "VITE_GOOGLE_API_KEY",
     keyPlaceholder: "AIza... / AQ...",
-    supportsImages: false,
-    runText: runGoogle
+    supportsImages: true,
+    runText: runGoogle,
+    generateImage: generateGoogleImage
   },
   {
     id: "mistral",
@@ -588,7 +705,7 @@ export const runTool = async (input: {
   tool: ToolDefinition;
   instruction: string;
   values: Record<string, string | number | boolean>;
-}): Promise<{ output: ToolOutput; usage?: TokenUsage }> => {
+}): Promise<ToolRunResult> => {
   const provider = PROVIDER_BY_ID[input.providerId];
   ensureApiKey(input.apiKey, provider.label);
 
@@ -620,7 +737,7 @@ export const runTool = async (input: {
     };
   }
 
-  if (!provider.supportsImages) {
+  if (!provider.generateImage) {
     return {
       usage: providerResult.usage,
       output: {
@@ -634,12 +751,24 @@ export const runTool = async (input: {
     };
   }
 
+  const generateImage = provider.generateImage;
+  if (!generateImage) {
+    throw new Error(`${provider.label} ondersteunt geen beeldgeneratie in BegrAIp.`);
+  }
+
   const size = String(input.values.aspect ?? "1536x1024");
+  let imageGenerationModel: string | undefined;
   const imageResults: ImageAsset[] = await Promise.all(
     normalized.images.map(async (asset) => {
       try {
-        const imageUrl = await generateOpenAIImage(input.apiKey, asset.prompt, size);
-        return { ...asset, aspectRatio: size, imageUrl };
+        const generated = await generateImage({
+          apiKey: input.apiKey,
+          model: input.model,
+          prompt: asset.prompt,
+          aspect: size
+        });
+        imageGenerationModel ??= generated.model;
+        return { ...asset, aspectRatio: size, imageUrl: generated.imageUrl };
       } catch (error) {
         return {
           ...asset,
@@ -652,6 +781,9 @@ export const runTool = async (input: {
 
   return {
     usage: providerResult.usage,
+    imageGenerationCount: imageResults.filter((asset) => Boolean(asset.imageUrl)).length,
+    imageGenerationSize: size,
+    imageGenerationModel,
     output: {
       ...normalized,
       images: imageResults

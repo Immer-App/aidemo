@@ -12,6 +12,14 @@ type PricingRule = {
   estimate: (usage: TokenUsage) => CostEstimate | undefined;
 };
 
+type OpenAIImageSize = "1024x1024" | "1536x1024" | "1024x1536";
+
+const OPENAI_IMAGE_MEDIUM_PRICING: Record<OpenAIImageSize, number> = {
+  "1024x1024": 0.04,
+  "1536x1024": 0.08,
+  "1024x1536": 0.08
+};
+
 const toCost = (tokens: number | undefined, usdPerMillion: number | undefined) =>
   typeof tokens === "number" && typeof usdPerMillion === "number"
     ? (tokens / 1_000_000) * usdPerMillion
@@ -88,6 +96,7 @@ export const PROVIDER_MODEL_PRESETS: Record<ProviderId, ProviderModelPreset[]> =
   ],
   google: [
     { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+    { id: "gemini-2.5-flash-image", label: "Gemini 2.5 Flash Image" },
     { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
     { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite" }
   ],
@@ -111,4 +120,21 @@ export const estimateCost = (
   }
   const rule = pricingRules.find((entry) => entry.providerId === providerId && entry.match(model));
   return rule?.estimate(usage);
+};
+
+export const estimateOpenAIImageGenerationCost = (
+  size: string,
+  imageCount: number
+): CostEstimate | undefined => {
+  const unitCostUsd = OPENAI_IMAGE_MEDIUM_PRICING[size.toLowerCase() as OpenAIImageSize];
+  if (!unitCostUsd || imageCount <= 0) {
+    return undefined;
+  }
+
+  const imageCostUsd = unitCostUsd * imageCount;
+  return {
+    imageCostUsd,
+    totalCostUsd: imageCostUsd,
+    pricingLabel: `OpenAI GPT Image 1 medium, ${size}`
+  };
 };

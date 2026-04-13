@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { trackEvent, trackProviderToggle, trackSelectionOnlyToggle } from "./analytics";
 import { DEFAULT_API_KEYS, PROVIDER_BY_ID, PROVIDERS, runTool } from "./openai";
-import { estimateCost, PROVIDER_MODEL_PRESETS } from "./pricing";
+import { estimateCost, estimateOpenAIImageGenerationCost, PROVIDER_MODEL_PRESETS } from "./pricing";
 import { TOOL_CATALOG, TOOL_BY_ID } from "./toolCatalog";
 import type { ProviderId } from "./openai";
 import type { QuizQuestion, RunGroup, RunResult, ToolDefinition, ToolField, UsageLogEntry } from "./types";
@@ -63,9 +63,19 @@ const formatTokenBreakdown = (usage?: { inputTokens?: number; outputTokens?: num
 const formatCostBreakdown = (cost?: {
   inputCostUsd?: number;
   outputCostUsd?: number;
+  imageCostUsd?: number;
   totalCostUsd?: number;
-}) =>
-  `Geschatte standaard API-kosten ${formatUsd(cost?.inputCostUsd)} in · ${formatUsd(cost?.outputCostUsd)} uit · ${formatUsd(cost?.totalCostUsd)} totaal`;
+}) => {
+  const parts = [
+    `Geschatte standaard API-kosten ${formatUsd(cost?.inputCostUsd)} in`,
+    `${formatUsd(cost?.outputCostUsd)} uit`
+  ];
+  if (typeof cost?.imageCostUsd === "number") {
+    parts.push(`${formatUsd(cost.imageCostUsd)} beeld`);
+  }
+  parts.push(`${formatUsd(cost?.totalCostUsd)} totaal`);
+  return parts.join(" · ");
+};
 const costDisclaimer = "Free tier / promo niet meegerekend";
 const customValueId = (fieldId: string) => `${fieldId}__custom`;
 const toAnalyticsKey = (value: string) =>
@@ -153,6 +163,53 @@ const getSafeQuizQuestions = (questions: QuizQuestion[] | undefined) =>
       )
     : [];
 
+const getQuizFeedback = (question: QuizQuestion) => ({
+  wrongExplanations:
+    Array.isArray(question.wrongExplanations) &&
+    question.wrongExplanations.length === question.choices.length
+      ? question.wrongExplanations
+      : [],
+  correctExplanation: question.correctExplanation ?? question.explanation
+});
+
+const splitStructuredLines = (value: string) =>
+  value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+const isNumberedLine = (line: string) => /^\d+[\).]\s+/.test(line);
+const isBulletedLine = (line: string) => /^[-*•]\s+/.test(line);
+
+const renderStructuredText = (body: string) => {
+  const lines = splitStructuredLines(body);
+  if (lines.length < 2) {
+    return <p>{body}</p>;
+  }
+
+  if (lines.every(isNumberedLine)) {
+    return (
+      <ol className="formatted-list numbered-list">
+        {lines.map((line, index) => (
+          <li key={`${index}-${line}`}>{line.replace(/^\d+[\).]\s+/, "")}</li>
+        ))}
+      </ol>
+    );
+  }
+
+  if (lines.every(isBulletedLine)) {
+    return (
+      <ul className="formatted-list bullet-list">
+        {lines.map((line, index) => (
+          <li key={`${index}-${line}`}>{line.replace(/^[-*•]\s+/, "")}</li>
+        ))}
+      </ul>
+    );
+  }
+
+  return <p>{body}</p>;
+};
+
 const logUsageEvent = (entry: UsageLogEntry) => {
   const endpoint = import.meta.env.VITE_USAGE_LOG_ENDPOINT?.trim();
   if (!endpoint) {
@@ -183,6 +240,7 @@ const logUsageEvent = (entry: UsageLogEntry) => {
 };
 
 export const App = () => {
+  const textAreaRef = useRef<HTMLTextAreaElement | null>(null);
   const [activeTab, setActiveTab] = useState<TopTab>("input");
   const [apiKeysByProvider, setApiKeysByProvider] = useState<Record<string, string>>(() => ({
     ...DEFAULT_API_KEYS
@@ -409,6 +467,15 @@ export const App = () => {
     });
   };
 
+  const clearSelection = () => {
+    setSelectedRange({ start: 0, end: 0 });
+    const textArea = textAreaRef.current;
+    if (textArea) {
+      textArea.focus();
+      textArea.setSelectionRange(0, 0);
+    }
+  };
+
   const updateAnswer = (resultId: string, questionIndex: number, answerIndex: number) => {
     setAnswersByResult((current) => ({
       ...current,
@@ -417,6 +484,34 @@ export const App = () => {
         [questionIndex]: answerIndex
       }
     }));
+  };
+
+  const exportSessionResults = () => {
+    const exportedAt = new Date().toISOString();
+    const payload = {
+      exportedAt,
+      app: "BegrAIp",
+      session: {
+        runGroupCount: runGroups.length,
+        resultCount: runGroups.reduce((count, group) => count + group.runs.length, 0)
+      },
+      runGroups
+    };
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: "application/json"
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `begraip-session-results-${exportedAt}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+
+    trackEvent("session_results_exported", {
+      run_group_count: payload.session.runGroupCount,
+      result_count: payload.session.resultCount
+    });
   };
 
   const runSelectedTool = async () => {
@@ -496,7 +591,25 @@ export const App = () => {
           let shouldSelect = false;
           let autoSelectRunId: string | null = null;
           const durationMs = performance.now() - startedAt;
-          const cost = estimateCost(pendingRun.providerId as ProviderId, pendingRun.model, result.usage);
+          const textCost = estimateCost(pendingRun.providerId as ProviderId, pendingRun.model, result.usage);
+          const imageCost =
+            pendingRun.providerId === "openai" &&
+            result.imageGenerationSize &&
+            result.imageGenerationCount
+              ? estimateOpenAIImageGenerationCost(result.imageGenerationSize, result.imageGenerationCount)
+              : undefined;
+          const shouldHideCostEstimate =
+            pendingRun.providerId === "google" && Boolean(result.imageGenerationCount);
+          const cost =
+            !shouldHideCostEstimate && (textCost || imageCost)
+              ? {
+                  inputCostUsd: textCost?.inputCostUsd,
+                  outputCostUsd: textCost?.outputCostUsd,
+                  imageCostUsd: imageCost?.imageCostUsd,
+                  totalCostUsd: (textCost?.totalCostUsd ?? 0) + (imageCost?.totalCostUsd ?? 0),
+                  pricingLabel: [textCost?.pricingLabel, imageCost?.pricingLabel].filter(Boolean).join(" + ")
+                }
+              : undefined;
           setRunGroups((current) =>
             current.map((group) => {
               if (group.id !== groupId) {
@@ -510,7 +623,8 @@ export const App = () => {
                       durationMs,
                       output: result.output,
                       usage: result.usage,
-                      cost
+                      cost,
+                      imageGenerationModel: result.imageGenerationModel
                     }
                   : run
               );
@@ -536,7 +650,8 @@ export const App = () => {
             selectedTextLength: selectedText.length,
             settings: selectedValues,
             usage: result.usage,
-            cost
+            cost,
+            imageGenerationModel: result.imageGenerationModel
           });
           trackEvent("tool_run_completed", {
             tool_id: selectedTool.id,
@@ -644,6 +759,7 @@ export const App = () => {
                 <label className="field-stack">
                   <span>Tekst</span>
                   <textarea
+                    ref={textAreaRef}
                     className="text-area"
                     value={text}
                     onChange={(event) => setText(event.target.value)}
@@ -668,9 +784,19 @@ export const App = () => {
                   </div>
                 </div>
                 <div className="selection-panel">
-                  <div className="section-head compact">
-                    <span>Selectie</span>
-                    <strong>{selectedText ? "Actieve focuspassage" : "Geen selectie"}</strong>
+                  <div className="section-head compact section-head-with-action">
+                    <div>
+                      <span>Selectie</span>
+                      <strong>{selectedText ? "Actieve focuspassage" : "Geen selectie"}</strong>
+                    </div>
+                    <button
+                      type="button"
+                      className="secondary-button clear-selection-button"
+                      onClick={clearSelection}
+                      disabled={!selectedText}
+                    >
+                      Selectie wissen
+                    </button>
                   </div>
                   <p>
                     {selectedText
@@ -970,9 +1096,19 @@ export const App = () => {
 
           {activeTab === "runs" ? (
             <div className="card controls-card">
-              <div className="section-head">
-                <span>Vergelijkingen</span>
-                <strong>Resultaten per prompt</strong>
+              <div className="section-head section-head-with-action">
+                <div>
+                  <span>Vergelijkingen</span>
+                  <strong>Resultaten per prompt</strong>
+                </div>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={exportSessionResults}
+                  disabled={!runGroups.length}
+                >
+                  Exporteer sessie-JSON
+                </button>
               </div>
               <div className="run-group-list">
                 {runGroups.length ? (
@@ -1037,7 +1173,7 @@ export const App = () => {
                               </p>
                               {run.status !== "pending" ? (
                                 <small className="token-meta">
-                                  {formatTokenBreakdown(run.usage)} · {formatCostBreakdown(run.cost)} · {costDisclaimer}
+                                  {formatTokenBreakdown(run.usage)}
                                 </small>
                               ) : null}
                             </button>
@@ -1079,6 +1215,10 @@ export const App = () => {
 
                 <div className="pill-row">
                   <span className="pill">Model: {activeResult.model}</span>
+                  {activeResult.imageGenerationModel &&
+                  activeResult.imageGenerationModel !== activeResult.model ? (
+                    <span className="pill">Beeldmodel: {activeResult.imageGenerationModel}</span>
+                  ) : null}
                   <span className="pill">
                     {formatTokenBreakdown(activeResult.usage)}
                   </span>
@@ -1160,7 +1300,7 @@ export const App = () => {
                 {activeOutput.sections?.map((section) => (
                   <section className="content-block" key={section.label}>
                     <h3>{section.label}</h3>
-                    <p>{section.body}</p>
+                    {renderStructuredText(section.body)}
                   </section>
                 ))}
 
@@ -1197,7 +1337,9 @@ export const App = () => {
                   </section>
                 ) : null}
 
-                {activeOutput.bullets?.length ? (
+                {activeOutput.bullets?.length &&
+                activeResult.toolId !== "open-questions" &&
+                activeResult.toolId !== "character-map" ? (
                   <section className="content-block">
                     <h3>Kernpunten</h3>
                     <ul className="bullet-list">
@@ -1272,6 +1414,7 @@ export const App = () => {
                       {getSafeQuizQuestions(activeOutput.quiz.questions).map((question, questionIndex) => {
                         const selectedAnswer = answersByResult[activeResult.id]?.[questionIndex];
                         const isAnswered = selectedAnswer !== undefined;
+                        const feedback = getQuizFeedback(question);
 
                         return (
                           <article className="quiz-card" key={`${activeResult.id}-${question.prompt}`}>
@@ -1296,11 +1439,22 @@ export const App = () => {
                                 );
                               })}
                             </div>
-                            {isAnswered && question.explanation ? (
-                              <p className="explanation">
-                                {selectedAnswer === question.correctIndex ? "Uitleg: " : "Waarom fout: "}
-                                {question.explanation}
-                              </p>
+                            {isAnswered ? (
+                              <div className="quiz-feedback">
+                                {selectedAnswer !== question.correctIndex &&
+                                feedback.wrongExplanations[selectedAnswer] ? (
+                                  <p className="explanation">
+                                    <strong>Waarom dit antwoord fout is:</strong>{" "}
+                                    {feedback.wrongExplanations[selectedAnswer]}
+                                  </p>
+                                ) : null}
+                                {feedback.correctExplanation ? (
+                                  <p className="explanation">
+                                    <strong>Waarom het goede antwoord klopt:</strong>{" "}
+                                    {feedback.correctExplanation}
+                                  </p>
+                                ) : null}
+                              </div>
                             ) : null}
                           </article>
                         );
