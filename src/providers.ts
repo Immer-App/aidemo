@@ -721,11 +721,14 @@ export const runTool = async (input: {
 
   const parsed = normalizeToolOutput(parseToolOutput(providerResult.text), input.tool);
   const filteredSections =
-    input.tool.id === "text-structure" && input.values.includeTips === false
-      ? parsed.sections?.filter((section) => section.label.toLowerCase() !== "leestips")
-      : parsed.sections;
+    input.tool.id === "summary" && input.values.format === "puntsgewijs"
+      ? undefined
+      : input.tool.id === "text-structure" && input.values.includeTips === false
+        ? parsed.sections?.filter((section) => section.label.toLowerCase() !== "leestips")
+        : parsed.sections;
   const filteredBullets =
-    input.tool.id === "summary" && input.values.format === "doorlopende tekst"
+    input.tool.id === "summary" &&
+    (input.values.format === "doorlopende tekst" || input.values.format === "stap voor stap")
       ? undefined
       : parsed.bullets;
   const normalized: ToolOutput = {

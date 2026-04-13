@@ -424,14 +424,14 @@ Vereisten:
 - bij "puntsgewijs" geef je de samenvatting alleen als bullets
 - bij "stap voor stap" geef je een korte genummerde volgorde met elk stapnummer op een nieuwe regel
 - sections en bullets moeten aansluiten op de gevraagde vorm; laat velden weg die niet passen
+- gebruik geen tussenkoppen als "Kern", "Belangrijkste details" of "Kernpunten"
 
 Geef alleen geldige JSON in dit formaat:
 {
   "title": "string",
   "summary": "string",
   "sections": [
-    { "label": "Kern", "body": "string" },
-    { "label": "Belangrijkste details", "body": "string" }
+    { "label": "Samenvatting", "body": "string" }
   ],
   "bullets": ["string"]
 }`, selectedText, customInstructions, undefined, selectionOnly)

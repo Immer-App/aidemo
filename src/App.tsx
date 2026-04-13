@@ -1363,7 +1363,18 @@ export const App = () => {
                   </section>
                 ) : null}
 
+                {activeOutput.bullets?.length && activeResult.toolId === "summary" ? (
+                  <section className="content-block">
+                    <ul className="bullet-list">
+                      {activeOutput.bullets.map((bullet) => (
+                        <li key={bullet}>{bullet}</li>
+                      ))}
+                    </ul>
+                  </section>
+                ) : null}
+
                 {activeOutput.bullets?.length &&
+                activeResult.toolId !== "summary" &&
                 activeResult.toolId !== "open-questions" &&
                 activeResult.toolId !== "character-map" &&
                 activeResult.toolId !== "text-structure" ? (
