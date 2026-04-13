@@ -44,6 +44,7 @@ export type QuizQuestion = {
   explanation?: string;
   correctExplanation?: string;
   wrongExplanations?: string[];
+  choiceExplanations?: string[];
 };
 
 export type GlossaryEntry = {

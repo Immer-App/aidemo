@@ -164,19 +164,45 @@ const getSafeQuizQuestions = (questions: QuizQuestion[] | undefined) =>
     : [];
 
 const getQuizFeedback = (question: QuizQuestion) => ({
+  choiceExplanations:
+    Array.isArray(question.choiceExplanations) &&
+    question.choiceExplanations.length === question.choices.length
+      ? question.choiceExplanations
+      : [],
   wrongExplanations:
     Array.isArray(question.wrongExplanations) &&
     question.wrongExplanations.length === question.choices.length
       ? question.wrongExplanations
       : [],
-  correctExplanation: question.correctExplanation ?? question.explanation
+  correctExplanation:
+    question.correctExplanation ??
+    (Array.isArray(question.choiceExplanations) ? question.choiceExplanations[question.correctIndex] : undefined) ??
+    question.explanation
 });
 
-const splitStructuredLines = (value: string) =>
-  value
+const splitStructuredLines = (value: string) => {
+  const normalized = value.replace(/\r/g, "").trim();
+  if (!normalized) {
+    return [];
+  }
+
+  const inlineNumberedParts = normalized
+    .split(/(?=\s*\d+[\).]\s+)/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  if (
+    inlineNumberedParts.length > 1 &&
+    inlineNumberedParts.every((part) => /^\d+[\).]\s+/.test(part))
+  ) {
+    return inlineNumberedParts;
+  }
+
+  return normalized
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
+};
 
 const isNumberedLine = (line: string) => /^\d+[\).]\s+/.test(line);
 const isBulletedLine = (line: string) => /^[-*•]\s+/.test(line);
@@ -1339,7 +1365,8 @@ export const App = () => {
 
                 {activeOutput.bullets?.length &&
                 activeResult.toolId !== "open-questions" &&
-                activeResult.toolId !== "character-map" ? (
+                activeResult.toolId !== "character-map" &&
+                activeResult.toolId !== "text-structure" ? (
                   <section className="content-block">
                     <h3>Kernpunten</h3>
                     <ul className="bullet-list">
@@ -1415,6 +1442,13 @@ export const App = () => {
                         const selectedAnswer = answersByResult[activeResult.id]?.[questionIndex];
                         const isAnswered = selectedAnswer !== undefined;
                         const feedback = getQuizFeedback(question);
+                        const selectedExplanation =
+                          selectedAnswer !== undefined
+                            ? feedback.choiceExplanations[selectedAnswer] ??
+                              (selectedAnswer !== question.correctIndex
+                                ? feedback.wrongExplanations[selectedAnswer]
+                                : feedback.correctExplanation)
+                            : undefined;
 
                         return (
                           <article className="quiz-card" key={`${activeResult.id}-${question.prompt}`}>
@@ -1441,14 +1475,17 @@ export const App = () => {
                             </div>
                             {isAnswered ? (
                               <div className="quiz-feedback">
-                                {selectedAnswer !== question.correctIndex &&
-                                feedback.wrongExplanations[selectedAnswer] ? (
+                                {selectedExplanation ? (
                                   <p className="explanation">
-                                    <strong>Waarom dit antwoord fout is:</strong>{" "}
-                                    {feedback.wrongExplanations[selectedAnswer]}
+                                    <strong>
+                                      {selectedAnswer === question.correctIndex
+                                        ? "Waarom dit antwoord goed is:"
+                                        : "Waarom dit antwoord fout is:"}
+                                    </strong>{" "}
+                                    {selectedExplanation}
                                   </p>
                                 ) : null}
-                                {feedback.correctExplanation ? (
+                                {selectedAnswer !== question.correctIndex && feedback.correctExplanation ? (
                                   <p className="explanation">
                                     <strong>Waarom het goede antwoord klopt:</strong>{" "}
                                     {feedback.correctExplanation}

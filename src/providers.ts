@@ -183,6 +183,10 @@ const normalizeToolOutput = (output: ToolOutput, tool: ToolDefinition): ToolOutp
                 typeof question.correctExplanation === "string"
                   ? normalizeTextBlock(question.correctExplanation)
                   : undefined,
+              choiceExplanations: normalizeQuizExplanationList(
+                isRecord(question) ? question.choiceExplanations : undefined,
+                question.choices.length
+              ),
               wrongExplanations: normalizeQuizExplanationList(
                 isRecord(question) ? question.wrongExplanations : undefined,
                 question.choices.length

@@ -102,8 +102,12 @@ Vereisten:
 - maak geloofwaardige afleiders
 - gebruik Nederlands
 - als foute antwoorden toelichten uit staat, laat dan alleen zien waarom het goede antwoord klopt
-- als foute antwoorden toelichten aan staat, geef dan eerst per fout antwoordoptie een korte uitleg waarom die specifieke optie niet klopt
-- leg daarna pas apart uit waarom het goede antwoord wel klopt
+- geef altijd per antwoordoptie een korte uitleg in choiceExplanations
+- als een antwoordoptie fout is, leg in die specifieke entry uit waarom juist die optie niet klopt
+- als een antwoordoptie goed is, leg in die specifieke entry uit waarom die optie wel klopt
+- als foute antwoorden toelichten aan staat, vul daarnaast wrongExplanations ook per fout antwoordoptie in
+- leg daarna apart uit waarom het goede antwoord wel klopt
+- maak choiceExplanations even lang als choices
 - maak wrongExplanations even lang als choices; zet op de plek van het goede antwoord een lege string
 
 Geef alleen geldige JSON in dit formaat:
@@ -118,6 +122,7 @@ Geef alleen geldige JSON in dit formaat:
         "prompt": "string",
         "choices": ["string"],
         "correctIndex": 0,
+        "choiceExplanations": ["string"],
         "correctExplanation": "string",
         "wrongExplanations": ["string"]
       }
@@ -417,7 +422,7 @@ Vereisten:
 - volg de gevraagde vorm exact
 - bij "doorlopende tekst" gebruik je geen bullets, geen nummering en geen losse labels
 - bij "puntsgewijs" geef je de samenvatting alleen als bullets
-- bij "stap voor stap" geef je een korte genummerde volgorde
+- bij "stap voor stap" geef je een korte genummerde volgorde met elk stapnummer op een nieuwe regel
 - sections en bullets moeten aansluiten op de gevraagde vorm; laat velden weg die niet passen
 
 Geef alleen geldige JSON in dit formaat:
@@ -553,7 +558,7 @@ Geef alleen geldige JSON in dit formaat:
   },
   {
     id: "text-structure",
-    name: "Tekststructuurcoach",
+    name: "Tekstanalyse",
     tagline: "Herken signaalwoorden en tekstverbanden.",
     description:
       "Laat zien hoe de tekst is opgebouwd en welke signaalwoorden helpen om verbanden te begrijpen.",
@@ -600,8 +605,7 @@ Geef alleen geldige JSON in dit formaat:
     { "label": "Structuur", "body": "string" },
     { "label": "Signaalwoorden", "body": "string" },
     { "label": "Leestips", "body": "string" }
-  ],
-  "bullets": ["string"]
+  ]
 }`, selectedText, customInstructions, undefined, selectionOnly)
   },
   {
@@ -732,6 +736,11 @@ ${selectionOnly && selectedText?.trim() ? selectedText : text}
 Instellingen:
 - aantal vragen: ${asNumber(values.questionCount)}
 - denkniveau: ${asText(values.thinkingLevel)}
+
+Vereisten:
+- zet de open vragen als genummerde lijst neer, met elke vraag op een nieuwe regel
+- zet het nakijkmodel als genummerde lijst neer, met elk criterium op een nieuwe regel
+- gebruik geen bullets en geen doorlopende alinea als er een lijst bedoeld is
 
 Geef alleen geldige JSON in dit formaat:
 {
