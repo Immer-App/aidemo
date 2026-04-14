@@ -1123,3 +1123,6 @@ button {
     text-align: left;
   }
 }
+.result-card .pill-row {
+  display: none;
+}
